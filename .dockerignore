@@ -1,0 +1,10 @@
+data/
+bin/
+.git/
+.idea/
+.vscode/
+.github/
+.env
+coverage.out
+*.test
+.DS_Store

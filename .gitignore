@@ -1,0 +1,26 @@
+# Build output
+bin/
+
+# Test output
+coverage.out
+*.test
+
+# Environment
+.env
+
+# Runtime config (copy from config.toml.example)
+config.toml
+
+# Data directory
+data/
+
+# IDEs
+.idea/
+.vscode/settings.json
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db

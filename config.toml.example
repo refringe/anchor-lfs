@@ -1,0 +1,61 @@
+# Anchor LFS configuration
+
+[options]
+listen_address = ":5420"
+data_directory = "./data"
+additional_logging = false
+#base_url = "https://lfs.example.com"
+
+# Maximum upload size in bytes (default: 5 GiB = 5368709120).
+#max_upload_size = 5368709120
+
+# Rate limiting: tokens per window (default: 10000 per 24h).
+#rate_limit_tokens = 10000
+#rate_limit_window = "24h"
+
+# GitHub auth cache TTL (default: 60s). Set to "0s" to disable caching.
+#auth_cache_ttl = "60s"
+
+# HMAC signing key for transfer URLs (hex-encoded, minimum 32 bytes / 64 hex characters). If omitted, a key is
+# auto-generated and saved to <data_directory>/signing.key so it persists across restarts. Set this explicitly to use a
+# specific key instead. Generate one with: `openssl rand -hex 32`
+#signing_key = ""
+
+# How long signed transfer URLs remain valid (default: 10m).
+#url_expiry = "10m"
+
+# Each [[endpoints]] block configures a repository whose LFS objects will be served. You can define multiple endpoints
+# for a single server instance.
+
+# Public repository: anyone can download, GitHub auth required to upload
+[[endpoints]]
+name = "My Repository"
+url = "https://github.com/org/repo"
+endpoint = "/org/repo"
+visibility = "public"
+authentication = "github"
+
+# Private repository: GitHub auth required for all operations
+#[[endpoints]]
+#name = "Private Repo"
+#url = "https://github.com/org/private-repo"
+#endpoint = "/org/private-repo"
+#visibility = "private"
+#authentication = "github"
+
+# GitHub Enterprise: set github_api_url to your instance's API endpoint
+#[[endpoints]]
+#name = "GHE Repo"
+#url = "https://github.example.com/org/repo"
+#endpoint = "/ghe/repo"
+#visibility = "private"
+#authentication = "github"
+#github_api_url = "https://github.example.com/api/v3/"
+
+# Local/testing: no authentication required
+#[[endpoints]]
+#name = "Local Dev"
+#url = "https://github.com/dev/test-repo"
+#endpoint = "/dev/test-repo"
+#visibility = "public"
+#authentication = "none"

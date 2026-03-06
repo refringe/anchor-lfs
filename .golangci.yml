@@ -1,0 +1,65 @@
+version: "2"
+
+linters:
+  default: none
+  enable:
+    - bodyclose
+    - copyloopvar
+    - errcheck
+    - errorlint
+    - exhaustive
+    - goconst
+    - gocritic
+    - gosec
+    - govet
+    - ineffassign
+    - misspell
+    - nakedret
+    - nilerr
+    - nilnil
+    - noctx
+    - nolintlint
+    - revive
+    - staticcheck
+    - unconvert
+    - unparam
+    - unused
+    - whitespace
+  settings:
+    goconst:
+      min-occurrences: 3
+    gosec:
+      excludes:
+        - G115
+        - G703
+    misspell:
+      locale: UK
+    nolintlint:
+      require-explanation: true
+      require-specific: true
+    revive:
+      rules:
+        - name: blank-imports
+        - name: context-as-argument
+        - name: error-return
+        - name: exported
+        - name: increment-decrement
+        - name: receiver-naming
+        - name: var-declaration
+        - name: unexported-return
+  exclusions:
+    rules:
+      - path: _test\.go
+        linters:
+          - bodyclose
+          - goconst
+          - nilnil
+          - unparam
+
+formatters:
+  enable:
+    - gofmt
+
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0
