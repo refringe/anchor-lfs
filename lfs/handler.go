@@ -193,9 +193,8 @@ func (h *Handler) BatchHandler(w http.ResponseWriter, r *http.Request) {
 
 // DownloadHandler handles GET /objects/{oid} requests.
 //
-// The HMAC-signed URL already proves the batch handler authorized this request,
-// so the requireAuth call below is defence-in-depth: it ensures credentials are
-// re-validated even if a signed URL leaks or the signing key is compromised.
+// The HMAC-signed URL already proves the batch handler authenticated and authorized this request. The batch response
+// sets "authenticated": true, which tells the Git LFS client not to resend credentials on transfer requests.
 func (h *Handler) DownloadHandler(w http.ResponseWriter, r *http.Request) {
 	r = assignRequestID(w, r)
 	if !h.requireValidSignature(w, r) {
@@ -205,10 +204,6 @@ func (h *Handler) DownloadHandler(w http.ResponseWriter, r *http.Request) {
 	oid := r.PathValue("oid")
 	if !isValidOID(oid) {
 		writeError(w, r, http.StatusUnprocessableEntity, "invalid object id")
-		return
-	}
-
-	if !h.requireAuth(w, r, auth.OperationDownload) {
 		return
 	}
 
@@ -245,9 +240,8 @@ func (h *Handler) DownloadHandler(w http.ResponseWriter, r *http.Request) {
 
 // UploadHandler handles PUT /objects/{oid} requests.
 //
-// The HMAC-signed URL already proves the batch handler authorized this request,
-// so the requireAuth call below is defence-in-depth: it ensures credentials are
-// re-validated even if a signed URL leaks or the signing key is compromised.
+// The HMAC-signed URL already proves the batch handler authenticated and authorized this request. The batch response
+// sets "authenticated": true, which tells the Git LFS client not to resend credentials on transfer requests.
 func (h *Handler) UploadHandler(w http.ResponseWriter, r *http.Request) {
 	r = assignRequestID(w, r)
 	if !h.requireValidSignature(w, r) {
@@ -257,10 +251,6 @@ func (h *Handler) UploadHandler(w http.ResponseWriter, r *http.Request) {
 	oid := r.PathValue("oid")
 	if !isValidOID(oid) {
 		writeError(w, r, http.StatusUnprocessableEntity, "invalid object id")
-		return
-	}
-
-	if !h.requireAuth(w, r, auth.OperationUpload) {
 		return
 	}
 
@@ -330,11 +320,6 @@ func (h *Handler) VerifyHandler(w http.ResponseWriter, r *http.Request) {
 	mediaType, _, _ := mime.ParseMediaType(r.Header.Get("Content-Type"))
 	if mediaType != lfsMediaType {
 		writeError(w, r, http.StatusUnsupportedMediaType, "expected Content-Type: "+lfsMediaType)
-		return
-	}
-
-	// Verify is a post-upload operation, so it requires push (upload) permission.
-	if !h.requireAuth(w, r, auth.OperationUpload) {
 		return
 	}
 
