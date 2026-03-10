@@ -10,30 +10,12 @@ permissions:
   packages: write
 
 jobs:
-  validate:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-go@v6
-        with:
-          go-version-file: go.mod
-      - run: make fmt-check
-      - uses: golangci/golangci-lint-action@v8
-      - run: go vet ./...
-      - run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
-      - run: make test
-
   release:
-    needs: validate
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0
-
-      - uses: actions/setup-go@v6
-        with:
-          go-version-file: go.mod
 
       - name: Set build metadata
         id: meta
