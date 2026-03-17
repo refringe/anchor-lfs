@@ -137,13 +137,28 @@ func (l *Local) Size(ctx context.Context, endpoint, oid string) (int64, error) {
 	return info.Size(), nil
 }
 
-// filePath returns the sharded storage path for the given OID.
-// Callers must validate that oid is a 64-character hex string before calling
-// this function (see lfs.isValidOID). Short OIDs are stored without sharding
-// as a safety fallback.
+// filePath returns the sharded storage path for the given OID. The result is verified to reside within basePath as a
+// defence-in-depth measure against path traversal (callers should also validate that oid is a 64-character hex string
+// via lfs.isValidOID). Short OIDs are stored without sharding as a safety fallback.
 func (l *Local) filePath(endpoint, oid string) string {
+	var p string
 	if len(oid) < 4 {
-		return filepath.Join(l.basePath, sanitise.Endpoint(endpoint), oid)
+		p = filepath.Join(l.basePath, sanitise.Endpoint(endpoint), oid)
+	} else {
+		p = filepath.Join(l.basePath, sanitise.Endpoint(endpoint), oid[:2], oid[2:4], oid)
 	}
-	return filepath.Join(l.basePath, sanitise.Endpoint(endpoint), oid[:2], oid[2:4], oid)
+
+	// Resolve to an absolute path and verify containment within basePath.
+	abs, err := filepath.Abs(p)
+	if err != nil {
+		return l.basePath
+	}
+	base, err := filepath.Abs(l.basePath)
+	if err != nil {
+		return l.basePath
+	}
+	if !strings.HasPrefix(abs, base+string(filepath.Separator)) && abs != base {
+		return l.basePath
+	}
+	return abs
 }
