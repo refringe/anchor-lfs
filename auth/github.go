@@ -2,6 +2,8 @@ package auth
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -14,6 +16,16 @@ import (
 	"github.com/google/go-github/v69/github"
 	"github.com/refringe/anchor-lfs/config"
 )
+
+// cacheHMACKey is a random key generated at process start used to derive cache keys via HMAC-SHA256. Using HMAC with a
+// per-process key ensures token-derived cache keys are not predictable across restarts.
+var cacheHMACKey = func() []byte {
+	key := make([]byte, 32)
+	if _, err := rand.Read(key); err != nil {
+		panic("auth: failed to generate cache HMAC key: " + err.Error())
+	}
+	return key
+}()
 
 // Compile-time interface check.
 var _ Authenticator = (*GitHub)(nil)
@@ -194,9 +206,10 @@ func (g *GitHub) sweep() {
 	}
 }
 
-// cacheKey builds a cache key from the token, endpoint path, and operation.
-// The token is hashed so raw credentials are not stored in memory.
+// cacheKey builds a cache key from the token, endpoint path, and operation. The token is run through HMAC-SHA256 with a
+// per-process random key so raw credentials are not stored in memory and derived keys are not predictable.
 func cacheKey(token, endpointPath string, op Operation) string {
-	h := sha256.Sum256([]byte(token))
-	return hex.EncodeToString(h[:]) + "|" + endpointPath + "|" + string(op)
+	mac := hmac.New(sha256.New, cacheHMACKey)
+	mac.Write([]byte(token))
+	return hex.EncodeToString(mac.Sum(nil)) + "|" + endpointPath + "|" + string(op)
 }
