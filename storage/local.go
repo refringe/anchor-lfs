@@ -148,17 +148,13 @@ func (l *Local) filePath(endpoint, oid string) string {
 		p = filepath.Join(l.basePath, sanitise.Endpoint(endpoint), oid[:2], oid[2:4], oid)
 	}
 
-	// Resolve to an absolute path and verify containment within basePath.
-	abs, err := filepath.Abs(p)
-	if err != nil {
+	p = filepath.Clean(p)
+
+	// Verify the resolved path stays within basePath. filepath.Rel computes a relative path from basePath to p; if
+	// the result starts with ".." the path escapes the storage root.
+	rel, err := filepath.Rel(l.basePath, p)
+	if err != nil || strings.HasPrefix(rel, "..") {
 		return l.basePath
 	}
-	base, err := filepath.Abs(l.basePath)
-	if err != nil {
-		return l.basePath
-	}
-	if !strings.HasPrefix(abs, base+string(filepath.Separator)) && abs != base {
-		return l.basePath
-	}
-	return abs
+	return filepath.Join(l.basePath, rel)
 }
