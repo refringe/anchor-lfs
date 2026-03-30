@@ -11,7 +11,7 @@ require (
 	github.com/felixge/httpsnoop v1.0.4
 	github.com/google/go-github/v69 v69.2.0
 	github.com/realclientip/realclientip-go v1.0.0
-	github.com/rs/zerolog v1.34.0
+	github.com/rs/zerolog v1.35.0
 	github.com/sethvargo/go-limiter v1.1.0
 )
 
