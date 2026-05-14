@@ -51,6 +51,15 @@ func getRequestID(ctx context.Context) string {
 
 const lfsMediaType = "application/vnd.git-lfs+json"
 
+// msgInternalError is the generic message returned to clients for unexpected server-side failures.
+const msgInternalError = "internal error"
+
+// URL schemes used when constructing external base URLs.
+const (
+	schemeHTTP  = "http"
+	schemeHTTPS = "https"
+)
+
 // LFS operation names used in batch requests.
 const (
 	opDownload = "download"
@@ -213,7 +222,7 @@ func (h *Handler) DownloadHandler(w http.ResponseWriter, r *http.Request) {
 			writeError(w, r, http.StatusNotFound, "object not found")
 		} else {
 			log.Error().Err(err).Str("oid", oid).Msg("reading object")
-			writeError(w, r, http.StatusInternalServerError, "internal error")
+			writeError(w, r, http.StatusInternalServerError, msgInternalError)
 		}
 		return
 	}
@@ -275,7 +284,7 @@ func (h *Handler) UploadHandler(w http.ResponseWriter, r *http.Request) {
 	exists, err := h.store.Exists(r.Context(), h.endpoint.Path, oid)
 	if err != nil {
 		log.Error().Err(err).Str("oid", oid).Msg("checking object existence")
-		writeError(w, r, http.StatusInternalServerError, "internal error")
+		writeError(w, r, http.StatusInternalServerError, msgInternalError)
 		return
 	}
 	if exists {
@@ -296,7 +305,7 @@ func (h *Handler) UploadHandler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		log.Error().Err(err).Str("oid", oid).Msg("storing object")
-		writeError(w, r, http.StatusInternalServerError, "internal error")
+		writeError(w, r, http.StatusInternalServerError, msgInternalError)
 		return
 	}
 
@@ -342,7 +351,7 @@ func (h *Handler) VerifyHandler(w http.ResponseWriter, r *http.Request) {
 			writeError(w, r, http.StatusNotFound, "object not found")
 		} else {
 			log.Error().Err(err).Str("oid", req.OID).Msg("checking object size")
-			writeError(w, r, http.StatusInternalServerError, "internal error")
+			writeError(w, r, http.StatusInternalServerError, msgInternalError)
 		}
 		return
 	}
@@ -391,7 +400,7 @@ func (h *Handler) CreateLockHandler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		log.Error().Err(err).Str("endpoint", h.endpoint.Name).Msg("creating lock")
-		writeError(w, r, http.StatusInternalServerError, "internal error")
+		writeError(w, r, http.StatusInternalServerError, msgInternalError)
 		return
 	}
 
@@ -433,7 +442,7 @@ func (h *Handler) ListLocksHandler(w http.ResponseWriter, r *http.Request) {
 	})
 	if err != nil {
 		log.Error().Err(err).Str("endpoint", h.endpoint.Name).Msg("listing locks")
-		writeError(w, r, http.StatusInternalServerError, "internal error")
+		writeError(w, r, http.StatusInternalServerError, msgInternalError)
 		return
 	}
 
@@ -470,7 +479,7 @@ func (h *Handler) VerifyLocksHandler(w http.ResponseWriter, r *http.Request) {
 	})
 	if err != nil {
 		log.Error().Err(err).Str("endpoint", h.endpoint.Name).Msg("verifying locks")
-		writeError(w, r, http.StatusInternalServerError, "internal error")
+		writeError(w, r, http.StatusInternalServerError, msgInternalError)
 		return
 	}
 
@@ -528,7 +537,7 @@ func (h *Handler) UnlockHandler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		log.Error().Err(err).Str("endpoint", h.endpoint.Name).Msg("unlocking")
-		writeError(w, r, http.StatusInternalServerError, "internal error")
+		writeError(w, r, http.StatusInternalServerError, msgInternalError)
 		return
 	}
 
@@ -558,7 +567,7 @@ func (h *Handler) requireAuthResult(w http.ResponseWriter, r *http.Request, op a
 	result, err := h.authenticate(r, op)
 	if err != nil {
 		log.Error().Err(err).Str("endpoint", h.endpoint.Name).Msg("authentication error")
-		writeError(w, r, http.StatusInternalServerError, "internal error")
+		writeError(w, r, http.StatusInternalServerError, msgInternalError)
 		return auth.Result{}, false
 	}
 	if !result.Authenticated {
@@ -631,11 +640,11 @@ func (h *Handler) requestBaseURL(r *http.Request) string {
 	if h.baseURL != "" {
 		return h.baseURL
 	}
-	scheme := "http"
+	scheme := schemeHTTP
 	if r.TLS != nil {
-		scheme = "https"
+		scheme = schemeHTTPS
 	}
-	if proto := r.Header.Get("X-Forwarded-Proto"); proto == "http" || proto == "https" {
+	if proto := r.Header.Get("X-Forwarded-Proto"); proto == schemeHTTP || proto == schemeHTTPS {
 		scheme = proto
 	}
 	host := r.Host
@@ -689,7 +698,7 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	data, err := json.Marshal(v)
 	if err != nil {
 		log.Error().Err(err).Msg("marshalling JSON response")
-		http.Error(w, "internal error", http.StatusInternalServerError)
+		http.Error(w, msgInternalError, http.StatusInternalServerError)
 		return
 	}
 	w.Header().Set("Content-Type", lfsMediaType)

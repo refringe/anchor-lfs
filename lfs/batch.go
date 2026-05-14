@@ -54,7 +54,7 @@ func (h *Handler) processDownload(r *http.Request, obj Object, baseURL string) O
 			resp.Error = &ObjectError{Code: 404, Message: "object not found"}
 		} else {
 			log.Error().Err(err).Str("oid", obj.OID).Msg("reading object size")
-			resp.Error = &ObjectError{Code: 500, Message: "internal error"}
+			resp.Error = &ObjectError{Code: 500, Message: msgInternalError}
 		}
 		return resp
 	}
@@ -72,13 +72,13 @@ func (h *Handler) processDownload(r *http.Request, obj Object, baseURL string) O
 		href, err := p.PresignGet(r.Context(), h.endpoint.Path, obj.OID, h.signer.Expiry())
 		if err != nil {
 			log.Error().Err(err).Str("oid", obj.OID).Msg("presigning download URL")
-			resp.Error = &ObjectError{Code: 500, Message: "internal error"}
+			resp.Error = &ObjectError{Code: 500, Message: msgInternalError}
 			return resp
 		}
 		resp.Authenticated = new(bool)
 		*resp.Authenticated = true
 		resp.Actions = map[string]Action{
-			"download": {Href: href, ExpiresIn: int64(h.signer.Expiry().Seconds())},
+			opDownload: {Href: href, ExpiresIn: int64(h.signer.Expiry().Seconds())},
 		}
 		return resp
 	}
@@ -88,7 +88,7 @@ func (h *Handler) processDownload(r *http.Request, obj Object, baseURL string) O
 	resp.Authenticated = new(bool)
 	*resp.Authenticated = true
 	resp.Actions = map[string]Action{
-		"download": {
+		opDownload: {
 			Href:      signed.Href,
 			ExpiresIn: signed.ExpiresIn,
 			ExpiresAt: signed.ExpiresAt,
@@ -112,7 +112,7 @@ func (h *Handler) processUpload(r *http.Request, obj Object, baseURL string) Obj
 	exists, err := h.store.Exists(r.Context(), h.endpoint.Path, obj.OID)
 	if err != nil {
 		log.Error().Err(err).Str("oid", obj.OID).Msg("checking object existence")
-		resp.Error = &ObjectError{Code: 500, Message: "internal error"}
+		resp.Error = &ObjectError{Code: 500, Message: msgInternalError}
 		return resp
 	}
 	if exists {
@@ -125,7 +125,7 @@ func (h *Handler) processUpload(r *http.Request, obj Object, baseURL string) Obj
 		href, err := p.PresignPut(r.Context(), h.endpoint.Path, obj.OID, h.signer.Expiry())
 		if err != nil {
 			log.Error().Err(err).Str("oid", obj.OID).Msg("presigning upload URL")
-			resp.Error = &ObjectError{Code: 500, Message: "internal error"}
+			resp.Error = &ObjectError{Code: 500, Message: msgInternalError}
 			return resp
 		}
 		verifyPath := fmt.Sprintf("%s/objects/verify", h.endpoint.Path)
@@ -133,7 +133,7 @@ func (h *Handler) processUpload(r *http.Request, obj Object, baseURL string) Obj
 		resp.Authenticated = new(bool)
 		*resp.Authenticated = true
 		resp.Actions = map[string]Action{
-			"upload": {Href: href, ExpiresIn: int64(h.signer.Expiry().Seconds())},
+			opUpload: {Href: href, ExpiresIn: int64(h.signer.Expiry().Seconds())},
 			"verify": {
 				Href:      signedVerify.Href,
 				ExpiresIn: signedVerify.ExpiresIn,
@@ -150,7 +150,7 @@ func (h *Handler) processUpload(r *http.Request, obj Object, baseURL string) Obj
 	resp.Authenticated = new(bool)
 	*resp.Authenticated = true
 	resp.Actions = map[string]Action{
-		"upload": {
+		opUpload: {
 			Href:      signedUpload.Href,
 			ExpiresIn: signedUpload.ExpiresIn,
 			ExpiresAt: signedUpload.ExpiresAt,
