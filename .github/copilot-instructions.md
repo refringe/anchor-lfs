@@ -15,7 +15,7 @@ Always run these commands from the repository root. The `Makefile` is the single
 | Install deps | `go mod download` | Run first after cloning |
 | Build | `make build` | Output: `bin/anchor-lfs` |
 | Run tests | `make test` | Runs `go test -race ./...` |
-| Lint | `make lint` | Runs `golangci-lint run ./...` |
+| Lint | `make lint` | Runs `go tool golangci-lint run ./...` |
 | Format check | `make fmt-check` | Fails if any file needs formatting |
 | Format fix | `make fmt` | Runs `gofmt -w .` |
 | Vet | `go vet ./...` | Also run in CI |
