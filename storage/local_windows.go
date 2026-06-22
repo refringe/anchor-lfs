@@ -26,8 +26,8 @@ func (l *Local) AvailableSpace(ctx context.Context) (uint64, error) {
 	}
 
 	ret, _, callErr := getDiskFreeSpaceEx.Call(
-		uintptr(unsafe.Pointer(pathPtr)),
-		uintptr(unsafe.Pointer(&freeBytesAvailable)),
+		uintptr(unsafe.Pointer(pathPtr)),             //nolint:gosec // required for the GetDiskFreeSpaceExW syscall
+		uintptr(unsafe.Pointer(&freeBytesAvailable)), //nolint:gosec // required for the GetDiskFreeSpaceExW syscall
 		0,
 		0,
 	)
