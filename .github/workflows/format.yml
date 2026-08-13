@@ -2,23 +2,40 @@ name: Format
 
 on:
   push:
-    branches: [main]
+    branches: [develop, main]
   pull_request:
-    branches: [main]
-
-permissions:
-  contents: read
+    branches: [develop, main]
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+
 jobs:
-  format:
+  go-format:
+    name: Go Format
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-go@v6
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
-      - run: make fmt-check
+
+      - name: Check Go formatting
+        run: make fmt-check
+
+  prettier:
+    name: Prettier
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+
+      - name: Check formatting (JSON, YAML)
+        run: make prettier-check

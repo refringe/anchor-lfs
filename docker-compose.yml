@@ -2,7 +2,7 @@ services:
   anchor-lfs:
     build: .
     ports:
-      - "5420:5420"
+      - '5420:5420'
     volumes:
       - ./data:/app/data
       - ./config.toml:/app/config.toml:ro

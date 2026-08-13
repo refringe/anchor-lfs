@@ -2,25 +2,43 @@ name: Quality
 
 on:
   push:
-    branches: [main]
+    branches: [develop, main]
   pull_request:
-    branches: [main]
-
-permissions:
-  contents: read
+    branches: [develop, main]
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+
 jobs:
   lint:
+    name: Lint
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-go@v6
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
-      - run: go tool golangci-lint run ./...
-      - run: go vet ./...
-      - run: go mod tidy && git diff --exit-code go.mod go.sum
+
+      - name: Verify go.mod is tidy
+        run: |
+          go mod tidy
+          git diff --exit-code go.mod go.sum
+
+      - name: Verify no local replace directive
+        run: |
+          if grep -q '^replace.*' go.mod; then
+            echo "ERROR: go.mod contains an active replace directive."
+            echo "Remove or comment it out before releasing."
+            exit 1
+          fi
+
+      - name: Vet
+        run: make vet
+
+      - name: Lint
+        run: make lint

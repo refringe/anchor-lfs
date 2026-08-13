@@ -1,4 +1,4 @@
-.PHONY: build run test test-cover lint vet fmt fmt-check vulncheck check tidy docker-build docker-up docker-down docker-logs clean
+.PHONY: build run test test-cover lint vet fmt fmt-check prettier prettier-check vulncheck check tidy docker-build docker-up docker-down docker-logs clean
 
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
 COMMIT  ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo "unknown")
@@ -32,10 +32,16 @@ fmt:
 fmt-check:
 	test -z "$$(gofmt -l .)"
 
+prettier:
+	npx --yes prettier@3 --write '**/*.json' '**/*.yml'
+
+prettier-check:
+	npx --yes prettier@3 --check '**/*.json' '**/*.yml'
+
 vulncheck:
 	go run golang.org/x/vuln/cmd/govulncheck@latest ./...
 
-check: fmt-check lint vet vulncheck test
+check: fmt-check prettier-check lint vet vulncheck test
 
 # Dependencies
 tidy:
