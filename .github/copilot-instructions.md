@@ -16,24 +16,29 @@ Always run these commands from the repository root. The `Makefile` is the single
 | Build | `make build` | Output: `bin/anchor-lfs` |
 | Run tests | `make test` | Runs `go test -race ./...` |
 | Lint | `make lint` | Runs `go tool golangci-lint run ./...` |
-| Format check | `make fmt-check` | Fails if any file needs formatting |
+| Format check | `make fmt-check` | Fails if any Go file needs formatting |
 | Format fix | `make fmt` | Runs `gofmt -w .` |
+| Prettier check | `make prettier-check` | Fails if any JSON/YAML file needs formatting |
+| Prettier fix | `make prettier` | Runs `prettier --write` over JSON/YAML |
 | Vet | `go vet ./...` | Also run in CI |
 | Tidy check | `go mod tidy && git diff --exit-code go.mod go.sum` | CI rejects untidy modules |
-| Full check | `make check` | Runs: fmt-check, lint, vet, vulncheck, test |
+| Full check | `make check` | Runs: fmt-check, prettier-check, lint, vet, vulncheck, test |
 
 **Always run `make fmt` before committing.** Always run `make test` and `make lint` to validate changes. If you add or remove dependencies, run `go mod tidy` and include both `go.mod` and `go.sum` in the commit.
 
 ## CI Pipelines (GitHub Actions)
 
-Four workflows run on every push/PR to `main` (in `.github/workflows/`):
+Five workflows run on every push/PR to `develop` and `main` (in `.github/workflows/`):
 
-1. **Format** (`format.yml`): `make fmt-check`
-2. **Quality** (`quality.yml`): `golangci-lint`, `go vet ./...`, `go mod tidy` cleanliness check
-3. **Tests** (`tests.yml`): `make test`
-4. **Vulnerability** (`vulnerability.yml`): `govulncheck ./...`
+1. **Format** (`format.yml`): jobs `Go Format` (`make fmt-check`) and `Prettier` (`make prettier-check`)
+2. **Quality** (`quality.yml`): job `Lint` — `go mod tidy` cleanliness check, no-`replace`-directive check, `make vet`, `make lint`
+3. **Tests** (`tests.yml`): jobs `Test` (`make test`) and `Coverage` (`make test-cover`, uploads `coverage.out` as an artifact)
+4. **Vulnerability** (`vulnerability.yml`): job `Vulnerability Check` (`make vulncheck`)
+5. **CodeQL** (`codeql.yml`): job `Analyse`, matrix over `actions` and `go`
 
-A fifth workflow (`release.yml`) runs only on version tags and builds/publishes Docker images. All workflows use Go version from `go.mod`.
+A sixth workflow (`release.yml`) runs only on version tags and builds/publishes Docker images. All workflows use the Go version from `go.mod`.
+
+The job display names above are the required status check contexts in the repository's `develop` branch ruleset — renaming a job requires updating the ruleset. The repository also has a `main` ruleset blocking deletion and force-pushes.
 
 ## Code Style Requirements
 
@@ -94,11 +99,12 @@ A fifth workflow (`release.yml`) runs only on version tags and builds/publishes 
 │   └── testutil/           # Shared test helpers (e.g., SHA-256 computation)
 ├── Makefile                # All build/test/lint commands
 ├── .golangci.yml           # Linter configuration (27 linters, UK English)
+├── .prettierrc.json        # Prettier configuration (JSON/YAML formatting)
 ├── config.toml.example     # Example configuration file
 ├── Dockerfile              # Multi-stage build (golang:1.26-alpine -> alpine:3.21)
 ├── docker-compose.yml      # Docker Compose for local development
 └── .github/
-    ├── workflows/          # CI pipelines (format, quality, tests, vulnerability, release)
+    ├── workflows/          # CI pipelines (format, quality, tests, vulnerability, codeql, release)
     ├── CONTRIBUTING.md     # Contribution guidelines
     └── PULL_REQUEST_TEMPLATE.md
 ```
