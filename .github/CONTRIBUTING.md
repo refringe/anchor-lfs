@@ -5,7 +5,7 @@ Thank you for your interest in contributing!
 ## Getting Started
 
 1. Fork the repository and clone your fork
-2. Install Go 1.26+
+2. Install Go 1.27+
 3. Install dependencies: `go mod download`
 4. Copy and configure: `cp config.toml config.local.toml` (edit as needed)
 5. Run locally: `make run`

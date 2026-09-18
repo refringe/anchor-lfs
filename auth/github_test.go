@@ -2,7 +2,7 @@ package auth
 
 import (
 	"context"
-	"encoding/json"
+	"encoding/json/v2"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -24,11 +24,11 @@ func mockGitHubAPI(t *testing.T, requestCount *atomic.Int64, perms map[string]bo
 			authHeader := r.Header.Get("Authorization")
 			if authHeader == "" || authHeader == "Bearer bad-token" {
 				w.WriteHeader(http.StatusUnauthorized)
-				_ = json.NewEncoder(w).Encode(map[string]string{"message": "Bad credentials"})
+				_ = json.MarshalWrite(w, map[string]string{"message": "Bad credentials"})
 				return
 			}
 			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(map[string]any{
+			_ = json.MarshalWrite(w, map[string]any{
 				"login": "testuser",
 				"id":    42,
 			})
@@ -42,7 +42,7 @@ func mockGitHubAPI(t *testing.T, requestCount *atomic.Int64, perms map[string]bo
 		authHeader := r.Header.Get("Authorization")
 		if authHeader == "" || authHeader == "Bearer bad-token" {
 			w.WriteHeader(http.StatusUnauthorized)
-			_ = json.NewEncoder(w).Encode(map[string]string{"message": "Bad credentials"})
+			_ = json.MarshalWrite(w, map[string]string{"message": "Bad credentials"})
 			return
 		}
 
@@ -55,7 +55,7 @@ func mockGitHubAPI(t *testing.T, requestCount *atomic.Int64, perms map[string]bo
 		if perms != nil {
 			resp["permissions"] = perms
 		}
-		_ = json.NewEncoder(w).Encode(resp)
+		_ = json.MarshalWrite(w, resp)
 	}))
 }
 
@@ -247,14 +247,12 @@ func TestCacheConcurrency(t *testing.T) {
 
 	var wg sync.WaitGroup
 	for range 50 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			_, err := g.Authenticate(ctx, ep, "", "good-token", OperationDownload)
 			if err != nil {
 				t.Errorf("Authenticate: %v", err)
 			}
-		}()
+		})
 	}
 	wg.Wait()
 

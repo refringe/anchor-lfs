@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
+	"encoding/json/v2"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -130,7 +130,7 @@ func TestIntegrationRouting(t *testing.T) {
 		t.Fatalf("batch request: %v", err)
 	}
 	var batchResp lfs.BatchResponse
-	if err := json.NewDecoder(resp.Body).Decode(&batchResp); err != nil {
+	if err := json.UnmarshalRead(resp.Body, &batchResp); err != nil {
 		t.Fatalf("decoding batch response: %v", err)
 	}
 	_ = resp.Body.Close()
@@ -187,7 +187,7 @@ func TestIntegrationRouting(t *testing.T) {
 		t.Fatalf("download batch request: %v", err)
 	}
 	var dlBatchResp lfs.BatchResponse
-	if err := json.NewDecoder(resp.Body).Decode(&dlBatchResp); err != nil {
+	if err := json.UnmarshalRead(resp.Body, &dlBatchResp); err != nil {
 		t.Fatalf("decoding download batch response: %v", err)
 	}
 	_ = resp.Body.Close()

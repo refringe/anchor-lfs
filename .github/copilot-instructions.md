@@ -2,11 +2,11 @@
 
 ## Project Summary
 
-Anchor LFS is a lightweight, self-hosted Git LFS server written in Go 1.26. It implements the Git LFS Batch API spec, authenticates against GitHub organisation/repository permissions, and supports local filesystem or S3-compatible object storage with SHA-256 integrity verification. The codebase is small (~3,000 lines of Go across 8 packages) with no web framework; routing uses `net/http` with `http.ServeMux`.
+Anchor LFS is a lightweight, self-hosted Git LFS server written in Go 1.27. It implements the Git LFS Batch API spec, authenticates against GitHub organisation/repository permissions, and supports local filesystem or S3-compatible object storage with SHA-256 integrity verification. The codebase is small (~3,000 lines of Go across 8 packages) with no web framework; routing uses `net/http` with `http.ServeMux`.
 
 ## Build, Test, and Validate
 
-**Runtime:** Go 1.26+ (specified in `go.mod`). **Linter:** golangci-lint v2 (config version `"2"` in `.golangci.yml`).
+**Runtime:** Go 1.27+ (specified in `go.mod`; older local toolchains auto-download it via `GOTOOLCHAIN=auto`). **Linter:** golangci-lint v2 (config version `"2"` in `.golangci.yml`).
 
 Always run these commands from the repository root. The `Makefile` is the single source of truth for all commands.
 
@@ -47,7 +47,7 @@ The job display names above are the required status check contexts in the reposi
 **Linter rules to watch:**
 - `nolintlint`: Every `//nolint:` directive must include both the specific linter name and a `// reason` comment. Example: `//nolint:gosec // path is operator-controlled`
 - `goconst`: Strings used 3+ times should be constants
-- `errorlint`: Use `errors.Is()` and `errors.As()` for error comparisons
+- `errorlint`: Use `errors.Is()` and `errors.AsType[*T]()` for error comparisons
 - `bodyclose`: Always close HTTP response bodies
 - Test files (`_test.go`) are exempt from `bodyclose`, `goconst`, `nilnil`, and `unparam`
 
@@ -57,6 +57,8 @@ The job display names above are the required status check contexts in the reposi
 - Structured logging via `zerolog` (use `log` from `github.com/rs/zerolog/log`)
 - Interface-based adapters with compile-time checks: `var _ Interface = (*Impl)(nil)`
 - Dependency injection via config structs (e.g., `HandlerConfig`)
+- JSON via `encoding/json/v2` (`json.UnmarshalRead` for request bodies, `json.MarshalWrite`/`json.Marshal` for responses); use `omitzero` rather than `omitempty` on numeric and bool fields
+- Modern stdlib over hand-rolled code: `slices`, `cmp`, `min`/`max`, `sync.WaitGroup.Go`, and the `uuid` package (`go fix ./...` should report nothing)
 
 ## Project Layout
 
@@ -98,10 +100,10 @@ The job display names above are the required status check contexts in the reposi
 │   ├── sanitise/           # Path sanitisation for endpoint directory names
 │   └── testutil/           # Shared test helpers (e.g., SHA-256 computation)
 ├── Makefile                # All build/test/lint commands
-├── .golangci.yml           # Linter configuration (27 linters, UK English)
+├── .golangci.yml           # Linter configuration (23 linters, UK English)
 ├── .prettierrc.json        # Prettier configuration (JSON/YAML formatting)
 ├── config.toml.example     # Example configuration file
-├── Dockerfile              # Multi-stage build (golang:1.26-alpine -> alpine:3.21)
+├── Dockerfile              # Multi-stage build (golang:1.27-alpine -> alpine:3.24)
 ├── docker-compose.yml      # Docker Compose for local development
 └── .github/
     ├── workflows/          # CI pipelines (format, quality, tests, vulnerability, codeql, release)

@@ -178,10 +178,7 @@ const minSweepInterval = time.Second
 func (g *GitHub) startSweeperLocked() {
 	g.stopCh = make(chan struct{})
 	go func() {
-		interval := g.cacheTTL / 2
-		if interval < minSweepInterval {
-			interval = minSweepInterval
-		}
+		interval := max(g.cacheTTL/2, minSweepInterval)
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
 		for {

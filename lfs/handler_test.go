@@ -3,7 +3,7 @@ package lfs
 import (
 	"bytes"
 	"context"
-	"encoding/json"
+	"encoding/json/v2"
 	"errors"
 	"fmt"
 	"net/http"
@@ -75,7 +75,7 @@ func TestBatchDownloadNotFound(t *testing.T) {
 	}
 
 	var resp BatchResponse
-	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+	if err := json.UnmarshalRead(w.Body, &resp); err != nil {
 		t.Fatalf("decoding response: %v", err)
 	}
 
@@ -112,7 +112,7 @@ func TestBatchUploadNewObject(t *testing.T) {
 	}
 
 	var resp BatchResponse
-	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+	if err := json.UnmarshalRead(w.Body, &resp); err != nil {
 		t.Fatalf("decoding response: %v", err)
 	}
 
@@ -509,7 +509,7 @@ func TestBatchUploadRejectsOversizedObject(t *testing.T) {
 	}
 
 	var resp BatchResponse
-	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+	if err := json.UnmarshalRead(w.Body, &resp); err != nil {
 		t.Fatalf("decoding response: %v", err)
 	}
 	if len(resp.Objects) != 1 {
@@ -544,7 +544,7 @@ func TestBatchAcceptsZeroSizeObject(t *testing.T) {
 	}
 
 	var resp BatchResponse
-	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+	if err := json.UnmarshalRead(w.Body, &resp); err != nil {
 		t.Fatalf("decoding response: %v", err)
 	}
 	if len(resp.Objects) != 1 {
@@ -578,7 +578,7 @@ func TestBatchRejectsNegativeSize(t *testing.T) {
 	}
 
 	var resp BatchResponse
-	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+	if err := json.UnmarshalRead(w.Body, &resp); err != nil {
 		t.Fatalf("decoding response: %v", err)
 	}
 	if len(resp.Objects) != 1 {
@@ -651,7 +651,7 @@ func TestCreateLockAndList(t *testing.T) {
 	}
 
 	var createResp CreateLockResponse
-	if err := json.NewDecoder(w.Body).Decode(&createResp); err != nil {
+	if err := json.UnmarshalRead(w.Body, &createResp); err != nil {
 		t.Fatalf("decoding response: %v", err)
 	}
 	if createResp.Lock.Path != "path/to/file.dat" {
@@ -672,7 +672,7 @@ func TestCreateLockAndList(t *testing.T) {
 	}
 
 	var listResp ListLocksResponse
-	if err := json.NewDecoder(lw.Body).Decode(&listResp); err != nil {
+	if err := json.UnmarshalRead(lw.Body, &listResp); err != nil {
 		t.Fatalf("decoding response: %v", err)
 	}
 	if len(listResp.Locks) != 1 {
@@ -723,7 +723,7 @@ func TestUnlockHandler(t *testing.T) {
 		t.Fatalf("expected 201, got %d", w.Code)
 	}
 	var createResp CreateLockResponse
-	_ = json.NewDecoder(w.Body).Decode(&createResp)
+	_ = json.UnmarshalRead(w.Body, &createResp)
 
 	// Unlock it.
 	unlockBody, _ := json.Marshal(UnlockRequest{})
@@ -743,7 +743,7 @@ func TestUnlockHandler(t *testing.T) {
 	lw := httptest.NewRecorder()
 	h.ListLocksHandler(lw, listReq)
 	var listResp ListLocksResponse
-	_ = json.NewDecoder(lw.Body).Decode(&listResp)
+	_ = json.UnmarshalRead(lw.Body, &listResp)
 	if len(listResp.Locks) != 0 {
 		t.Fatalf("expected 0 locks after unlock, got %d", len(listResp.Locks))
 	}
@@ -774,7 +774,7 @@ func TestVerifyLocksHandler(t *testing.T) {
 		t.Fatalf("expected 200, got %d: %s", vw.Code, vw.Body.String())
 	}
 	var verifyResp VerifyLocksResponse
-	_ = json.NewDecoder(vw.Body).Decode(&verifyResp)
+	_ = json.UnmarshalRead(vw.Body, &verifyResp)
 	if len(verifyResp.Ours) != 1 {
 		t.Fatalf("expected 1 lock in ours, got %d", len(verifyResp.Ours))
 	}
@@ -798,7 +798,7 @@ func TestErrorResponseIncludesRequestID(t *testing.T) {
 	}
 
 	var resp ErrorResponse
-	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+	if err := json.UnmarshalRead(w.Body, &resp); err != nil {
 		t.Fatalf("decoding error response: %v", err)
 	}
 	if resp.RequestID != rid {
@@ -1102,7 +1102,7 @@ func TestBatchMixedSuccessAndFailure(t *testing.T) {
 	}
 
 	var resp BatchResponse
-	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+	if err := json.UnmarshalRead(w.Body, &resp); err != nil {
 		t.Fatalf("decoding response: %v", err)
 	}
 	if len(resp.Objects) != 4 {
@@ -1165,7 +1165,7 @@ func TestBatchUploadMixedNewAndExisting(t *testing.T) {
 	}
 
 	var resp BatchResponse
-	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+	if err := json.UnmarshalRead(w.Body, &resp); err != nil {
 		t.Fatalf("decoding response: %v", err)
 	}
 	if len(resp.Objects) != 2 {

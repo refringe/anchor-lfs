@@ -4,7 +4,7 @@ package middleware
 import (
 	"crypto/rand"
 	"encoding/hex"
-	"encoding/json"
+	"encoding/json/v2"
 	"net/http"
 	"strconv"
 	"time"
@@ -59,16 +59,13 @@ func RateLimit(store limiter.Store, next http.Handler) http.Handler {
 			return
 		}
 		if !ok {
-			retryAfter := time.Until(time.Unix(0, min(int64(reset), maxResetNanos)))
-			if retryAfter < time.Second {
-				retryAfter = time.Second
-			}
+			retryAfter := max(time.Until(time.Unix(0, min(int64(reset), maxResetNanos))), time.Second)
 			requestID := GenerateRequestID()
 			w.Header().Set("Content-Type", "application/vnd.git-lfs+json")
 			w.Header().Set("Retry-After", strconv.Itoa(int(retryAfter.Seconds())))
 			w.Header().Set("X-Request-ID", requestID)
 			w.WriteHeader(http.StatusTooManyRequests)
-			_ = json.NewEncoder(w).Encode(map[string]string{
+			_ = json.MarshalWrite(w, map[string]string{
 				"message":           "rate limit exceeded",
 				"request_id":        requestID,
 				"documentation_url": "https://github.com/refringe/anchor-lfs/wiki",

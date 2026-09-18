@@ -5,7 +5,7 @@ package lfs
 import (
 	"context"
 	"encoding/hex"
-	"encoding/json"
+	"encoding/json/v2"
 	"errors"
 	"fmt"
 	"io"
@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"net/url"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -130,7 +131,7 @@ func (h *Handler) BatchHandler(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodyBytes)
 
 	var req BatchRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := json.UnmarshalRead(r.Body, &req); err != nil {
 		if _, ok := errors.AsType[*http.MaxBytesError](err); ok {
 			writeError(w, r, http.StatusRequestEntityTooLarge, "request body too large")
 			return
@@ -151,7 +152,7 @@ func (h *Handler) BatchHandler(w http.ResponseWriter, r *http.Request) {
 
 	// Validate transfer adapters — if the client specifies a list, it must
 	// include "basic" (the only adapter this server supports).
-	if len(req.Transfers) > 0 && !containsTransfer(req.Transfers, "basic") {
+	if len(req.Transfers) > 0 && !slices.ContainsFunc(req.Transfers, func(t string) bool { return strings.EqualFold(t, "basic") }) {
 		writeError(w, r, http.StatusUnprocessableEntity, "unsupported transfer adapter; only 'basic' is supported")
 		return
 	}
@@ -241,7 +242,7 @@ func (h *Handler) DownloadHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	w.Header().Set("Content-Length", fmt.Sprintf("%d", size))
+	w.Header().Set("Content-Length", strconv.FormatInt(size, 10))
 	if _, err := io.Copy(w, reader); err != nil {
 		log.Error().Err(err).Str("oid", oid).Msg("writing download response")
 	}
@@ -335,7 +336,7 @@ func (h *Handler) VerifyHandler(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodyBytes)
 
 	var req VerifyRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := json.UnmarshalRead(r.Body, &req); err != nil {
 		writeError(w, r, http.StatusUnprocessableEntity, "invalid request body")
 		return
 	}
@@ -379,7 +380,7 @@ func (h *Handler) CreateLockHandler(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodyBytes)
 
 	var req CreateLockRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := json.UnmarshalRead(r.Body, &req); err != nil {
 		writeError(w, r, http.StatusUnprocessableEntity, "invalid request body")
 		return
 	}
@@ -446,10 +447,6 @@ func (h *Handler) ListLocksHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if locks == nil {
-		locks = make([]Lock, 0)
-	}
-
 	writeJSON(w, http.StatusOK, ListLocksResponse{Locks: locks, NextCursor: nextCursor})
 }
 
@@ -468,7 +465,7 @@ func (h *Handler) VerifyLocksHandler(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodyBytes)
 
 	var req VerifyLocksRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := json.UnmarshalRead(r.Body, &req); err != nil {
 		writeError(w, r, http.StatusUnprocessableEntity, "invalid request body")
 		return
 	}
@@ -515,7 +512,7 @@ func (h *Handler) UnlockHandler(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodyBytes)
 
 	var req UnlockRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := json.UnmarshalRead(r.Body, &req); err != nil {
 		writeError(w, r, http.StatusUnprocessableEntity, "invalid request body")
 		return
 	}
@@ -678,16 +675,6 @@ func isValidForwardedHost(host string) bool {
 	}
 	// No port; the entire value should be a bare hostname or IPv6 bracket literal.
 	return u.Host == host
-}
-
-// containsTransfer checks if a transfer adapter name is in the list (case-insensitive).
-func containsTransfer(transfers []string, name string) bool {
-	for _, t := range transfers {
-		if strings.EqualFold(t, name) {
-			return true
-		}
-	}
-	return false
 }
 
 const documentationURL = "https://github.com/refringe/anchor-lfs/wiki"

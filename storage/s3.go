@@ -255,9 +255,9 @@ func isS3NotFound(err error) bool {
 	}
 	// The S3 HeadObject API returns a generic error with "NotFound" in the message for missing objects rather than a
 	// typed error. Check for the HTTP 404 status code in the error message as a fallback.
-	var respErr interface{ HTTPStatusCode() int }
-	if errors.As(err, &respErr) && respErr.HTTPStatusCode() == 404 {
-		return true
-	}
-	return false
+	respErr, ok := errors.AsType[interface {
+		error
+		HTTPStatusCode() int
+	}](err)
+	return ok && respErr.HTTPStatusCode() == 404
 }

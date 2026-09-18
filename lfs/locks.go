@@ -1,18 +1,18 @@
 package lfs
 
 import (
+	"cmp"
 	"context"
-	"crypto/rand"
-	"encoding/hex"
-	"encoding/json"
+	"encoding/json/v2"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
+	"slices"
 	"strings"
 	"sync"
 	"time"
+	"uuid"
 
 	"github.com/rs/zerolog/log"
 
@@ -126,7 +126,7 @@ func (s *FileLockStore) loadLocks(endpoint string) ([]Lock, error) {
 		}
 		// File exists and metadata matches — cache hit.
 		if c.modTime.Equal(info.ModTime()) && c.size == info.Size() {
-			return copyLocks(c.locks), nil
+			return slices.Clone(c.locks), nil
 		}
 		// Metadata changed — fall through to re-read.
 	}
@@ -150,22 +150,11 @@ func (s *FileLockStore) loadLocks(endpoint string) ([]Lock, error) {
 		return nil, fmt.Errorf("parsing locks: %w", err)
 	}
 	s.cache.Store(key, cachedLocks{
-		locks:   copyLocks(locks),
+		locks:   slices.Clone(locks),
 		modTime: info.ModTime(),
 		size:    info.Size(),
 	})
 	return locks, nil
-}
-
-// copyLocks returns a shallow copy of the lock slice so callers cannot
-// mutate the cached data.
-func copyLocks(src []Lock) []Lock {
-	if src == nil {
-		return nil
-	}
-	dst := make([]Lock, len(src))
-	copy(dst, src)
-	return dst
 }
 
 // saveLocks writes locks to disk atomically (temp file + fsync + rename).
@@ -218,24 +207,11 @@ func (s *FileLockStore) saveLocks(endpoint string, locks []Lock) error {
 		return nil
 	}
 	s.cache.Store(sanitise.Endpoint(endpoint), cachedLocks{
-		locks:   copyLocks(locks),
+		locks:   slices.Clone(locks),
 		modTime: info.ModTime(),
 		size:    info.Size(),
 	})
 	return nil
-}
-
-// generateLockID creates a UUID v4 string. It uses hex.EncodeToString for clarity and to avoid manual hex formatting
-// with fmt.Sprintf.
-func generateLockID() (string, error) {
-	var b [16]byte
-	if _, err := rand.Read(b[:]); err != nil {
-		return "", fmt.Errorf("generating lock ID: %w", err)
-	}
-	b[6] = (b[6] & 0x0f) | 0x40 // Version 4.
-	b[8] = (b[8] & 0x3f) | 0x80 // Variant 10.
-	h := hex.EncodeToString(b[:])
-	return h[:8] + "-" + h[8:12] + "-" + h[12:16] + "-" + h[16:20] + "-" + h[20:], nil
 }
 
 // Create acquires a lock on the given path for the named owner.
@@ -257,19 +233,12 @@ func (s *FileLockStore) Create(ctx context.Context, endpoint, path, ownerName st
 	// most filesystems (and the Git LFS spec) treat them as case-sensitive.
 	// This differs from owner comparison (case-insensitive) because
 	// usernames may vary in casing across auth providers.
-	for _, l := range locks {
-		if l.Path == path {
-			return l, ErrLockExists
-		}
-	}
-
-	id, err := generateLockID()
-	if err != nil {
-		return Lock{}, err
+	if i := slices.IndexFunc(locks, func(l Lock) bool { return l.Path == path }); i >= 0 {
+		return locks[i], ErrLockExists
 	}
 
 	lock := Lock{
-		ID:       id,
+		ID:       uuid.New().String(),
 		Path:     path,
 		LockedAt: time.Now().UTC().Format(time.RFC3339),
 		Owner:    LockOwner{Name: ownerName},
@@ -297,11 +266,8 @@ func (s *FileLockStore) List(ctx context.Context, endpoint string, opts ListLock
 	}
 
 	// Sort by creation time (stable order for pagination).
-	sort.Slice(locks, func(i, j int) bool {
-		if locks[i].LockedAt == locks[j].LockedAt {
-			return locks[i].ID < locks[j].ID
-		}
-		return locks[i].LockedAt < locks[j].LockedAt
+	slices.SortFunc(locks, func(a, b Lock) int {
+		return cmp.Or(strings.Compare(a.LockedAt, b.LockedAt), strings.Compare(a.ID, b.ID))
 	})
 
 	// Apply filters.
@@ -318,14 +284,7 @@ func (s *FileLockStore) List(ctx context.Context, endpoint string, opts ListLock
 
 	// Apply cursor (skip past the lock with this ID).
 	if opts.Cursor != "" {
-		idx := -1
-		for i, l := range filtered {
-			if l.ID == opts.Cursor {
-				idx = i
-				break
-			}
-		}
-		if idx >= 0 {
+		if idx := slices.IndexFunc(filtered, func(l Lock) bool { return l.ID == opts.Cursor }); idx >= 0 {
 			filtered = filtered[idx+1:]
 		}
 	}
@@ -364,13 +323,7 @@ func (s *FileLockStore) Unlock(ctx context.Context, endpoint, id, requester stri
 		return Lock{}, err
 	}
 
-	idx := -1
-	for i, l := range locks {
-		if l.ID == id {
-			idx = i
-			break
-		}
-	}
+	idx := slices.IndexFunc(locks, func(l Lock) bool { return l.ID == id })
 	if idx < 0 {
 		return Lock{}, ErrLockNotFound
 	}
@@ -381,7 +334,7 @@ func (s *FileLockStore) Unlock(ctx context.Context, endpoint, id, requester stri
 		return Lock{}, ErrLockNotOwner
 	}
 
-	locks = append(locks[:idx], locks[idx+1:]...)
+	locks = slices.Delete(locks, idx, idx+1)
 	if err := s.saveLocks(endpoint, locks); err != nil {
 		return Lock{}, err
 	}

@@ -27,6 +27,8 @@ docker compose up -d
 
 ### From Source
 
+Requires Go 1.27 or later.
+
 ```bash
 # Build
 make build
@@ -59,10 +61,11 @@ make run          # Build and run
 make test         # Run tests with race detector
 make test-cover   # Run tests with coverage report
 make lint         # Run golangci-lint
-make fmt          # Format code
+make fmt          # Format Go code
+make prettier     # Format JSON and YAML
 make vet          # Run go vet
 make vulncheck    # Vulnerability scan
-make check        # Run all checks (fmt, lint, vet, vulncheck, test)
+make check        # Run all checks (fmt, prettier, lint, vet, vulncheck, test)
 make tidy         # Run go mod tidy
 make clean        # Remove build artefacts
 ```

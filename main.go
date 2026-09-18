@@ -4,7 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
-	"encoding/json"
+	"encoding/json/v2"
 	"errors"
 	"fmt"
 	"net/http"
@@ -179,7 +179,7 @@ func main() {
 
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]string{
+		_ = json.MarshalWrite(w, map[string]string{
 			"status":  "ok",
 			"version": version,
 		})
@@ -191,7 +191,7 @@ func main() {
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]string{"version": version})
+		_ = json.MarshalWrite(w, map[string]string{"version": version})
 	})
 
 	var handler http.Handler = mux

@@ -47,7 +47,7 @@ type ObjectResponse struct {
 type Action struct {
 	Href      string            `json:"href"`
 	Header    map[string]string `json:"header,omitempty"`
-	ExpiresIn int64             `json:"expires_in,omitempty"`
+	ExpiresIn int64             `json:"expires_in,omitzero"`
 	ExpiresAt string            `json:"expires_at,omitempty"`
 }
 
@@ -107,7 +107,7 @@ type ListLocksResponse struct {
 type VerifyLocksRequest struct {
 	Ref    *Ref   `json:"ref,omitempty"`
 	Cursor string `json:"cursor,omitempty"`
-	Limit  int    `json:"limit,omitempty"`
+	Limit  int    `json:"limit,omitzero"`
 }
 
 // VerifyLocksResponse is the response from POST /locks/verify.
@@ -119,7 +119,7 @@ type VerifyLocksResponse struct {
 
 // UnlockRequest is the incoming request to POST /locks/:id/unlock.
 type UnlockRequest struct {
-	Force bool `json:"force,omitempty"`
+	Force bool `json:"force,omitzero"`
 	Ref   *Ref `json:"ref,omitempty"`
 }
 

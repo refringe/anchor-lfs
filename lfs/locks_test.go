@@ -263,12 +263,10 @@ func TestFileLockStoreConcurrentCreate(t *testing.T) {
 
 	// Try to lock the same path concurrently.
 	for range 10 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			_, err := s.Create(ctx, "/repo", "contested.txt", "user")
 			results <- err
-		}()
+		})
 	}
 	wg.Wait()
 	close(results)
