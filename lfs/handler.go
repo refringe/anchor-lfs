@@ -4,7 +4,6 @@ package lfs
 
 import (
 	"context"
-	"encoding/hex"
 	"encoding/json/v2"
 	"errors"
 	"fmt"
@@ -212,7 +211,7 @@ func (h *Handler) DownloadHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	oid := r.PathValue("oid")
-	if !isValidOID(oid) {
+	if !storage.IsValidOID(oid) {
 		writeError(w, r, http.StatusUnprocessableEntity, "invalid object id")
 		return
 	}
@@ -259,7 +258,7 @@ func (h *Handler) UploadHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	oid := r.PathValue("oid")
-	if !isValidOID(oid) {
+	if !storage.IsValidOID(oid) {
 		writeError(w, r, http.StatusUnprocessableEntity, "invalid object id")
 		return
 	}
@@ -341,7 +340,7 @@ func (h *Handler) VerifyHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if !isValidOID(req.OID) {
+	if !storage.IsValidOID(req.OID) {
 		writeError(w, r, http.StatusUnprocessableEntity, "invalid object id")
 		return
 	}
@@ -611,17 +610,6 @@ func isValidLockPath(path string) bool {
 		return false
 	}
 	_, err := filepath.Localize(path) //nolint:misspell // stdlib function name uses American English
-	return err == nil
-}
-
-// isValidOID checks that an OID is a well-formed SHA-256 hex string (exactly
-// 64 hex characters). This prevents path traversal and rejects malformed input
-// before it reaches the storage layer.
-func isValidOID(oid string) bool {
-	if len(oid) != 64 {
-		return false
-	}
-	_, err := hex.DecodeString(oid)
 	return err == nil
 }
 

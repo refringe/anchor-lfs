@@ -39,7 +39,11 @@ func (l *Local) Exists(ctx context.Context, endpoint, oid string) (bool, error) 
 	if err := ctx.Err(); err != nil {
 		return false, err
 	}
-	_, err := os.Stat(l.filePath(endpoint, oid))
+	path, err := l.filePath(endpoint, oid)
+	if err != nil {
+		return false, err
+	}
+	_, err = os.Stat(path)
 	if err == nil {
 		return true, nil
 	}
@@ -54,8 +58,11 @@ func (l *Local) Get(ctx context.Context, endpoint, oid string) (io.ReadCloser, i
 	if err := ctx.Err(); err != nil {
 		return nil, 0, err
 	}
-	path := l.filePath(endpoint, oid)
-	f, err := os.Open(path) //nolint:gosec // path is constructed from validated OID hex strings
+	path, err := l.filePath(endpoint, oid)
+	if err != nil {
+		return nil, 0, err
+	}
+	f, err := os.Open(path) //nolint:gosec // path is built from a validated 64-character hex OID
 	if err != nil {
 		return nil, 0, fmt.Errorf("opening object %s: %w", oid, err)
 	}
@@ -76,7 +83,10 @@ func (l *Local) Put(ctx context.Context, endpoint, oid string, reader io.Reader)
 		return err
 	}
 
-	destPath := l.filePath(endpoint, oid)
+	destPath, err := l.filePath(endpoint, oid)
+	if err != nil {
+		return err
+	}
 	if err := os.MkdirAll(filepath.Dir(destPath), 0o750); err != nil {
 		return fmt.Errorf("creating directory: %w", err)
 	}
@@ -130,31 +140,22 @@ func (l *Local) Size(ctx context.Context, endpoint, oid string) (int64, error) {
 	if err := ctx.Err(); err != nil {
 		return 0, err
 	}
-	info, err := os.Stat(l.filePath(endpoint, oid))
+	path, err := l.filePath(endpoint, oid)
+	if err != nil {
+		return 0, err
+	}
+	info, err := os.Stat(path)
 	if err != nil {
 		return 0, fmt.Errorf("stat object %s: %w", oid, err)
 	}
 	return info.Size(), nil
 }
 
-// filePath returns the sharded storage path for the given OID. The result is verified to reside within basePath as a
-// defence-in-depth measure against path traversal (callers should also validate that oid is a 64-character hex string
-// via lfs.isValidOID). Short OIDs are stored without sharding as a safety fallback.
-func (l *Local) filePath(endpoint, oid string) string {
-	var p string
-	if len(oid) < 4 {
-		p = filepath.Join(l.basePath, sanitise.Endpoint(endpoint), oid)
-	} else {
-		p = filepath.Join(l.basePath, sanitise.Endpoint(endpoint), oid[:2], oid[2:4], oid)
+// filePath returns the sharded storage path for the given OID, or ErrInvalidOID when oid is not a SHA-256 hex digest.
+func (l *Local) filePath(endpoint, oid string) (string, error) {
+	oid, err := normaliseOID(oid)
+	if err != nil {
+		return "", err
 	}
-
-	p = filepath.Clean(p)
-
-	// Verify the resolved path stays within basePath. filepath.Rel computes a relative path from basePath to p; if
-	// the result starts with ".." the path escapes the storage root.
-	rel, err := filepath.Rel(l.basePath, p)
-	if err != nil || strings.HasPrefix(rel, "..") {
-		return l.basePath
-	}
-	return filepath.Join(l.basePath, rel)
+	return filepath.Join(l.basePath, sanitise.Endpoint(endpoint), oid[:2], oid[2:4], oid), nil
 }

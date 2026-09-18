@@ -117,9 +117,13 @@ func newS3WithClient(client s3API, presigner s3Presigner, bucket, prefix string,
 
 // Exists reports whether the object exists in the S3 bucket.
 func (s *S3) Exists(ctx context.Context, endpoint, oid string) (bool, error) {
-	_, err := s.client.HeadObject(ctx, &s3.HeadObjectInput{
+	key, err := s.objectKey(endpoint, oid)
+	if err != nil {
+		return false, err
+	}
+	_, err = s.client.HeadObject(ctx, &s3.HeadObjectInput{
 		Bucket: aws.String(s.bucket),
-		Key:    aws.String(s.objectKey(endpoint, oid)),
+		Key:    aws.String(key),
 	})
 	if err != nil {
 		if isS3NotFound(err) {
@@ -132,9 +136,13 @@ func (s *S3) Exists(ctx context.Context, endpoint, oid string) (bool, error) {
 
 // Get opens the object for reading and returns its size.
 func (s *S3) Get(ctx context.Context, endpoint, oid string) (io.ReadCloser, int64, error) {
+	key, err := s.objectKey(endpoint, oid)
+	if err != nil {
+		return nil, 0, err
+	}
 	resp, err := s.client.GetObject(ctx, &s3.GetObjectInput{
 		Bucket: aws.String(s.bucket),
-		Key:    aws.String(s.objectKey(endpoint, oid)),
+		Key:    aws.String(key),
 	})
 	if err != nil {
 		if isS3NotFound(err) {
@@ -153,11 +161,15 @@ func (s *S3) Get(ctx context.Context, endpoint, oid string) (io.ReadCloser, int6
 // Put streams reader content to S3, verifying the SHA-256 hash matches the OID. If the hash does not match, the
 // uploaded object is deleted and ErrHashMismatch is returned.
 func (s *S3) Put(ctx context.Context, endpoint, oid string, reader io.Reader) error {
+	key, err := s.objectKey(endpoint, oid)
+	if err != nil {
+		return err
+	}
+
 	hasher := sha256.New()
 	tee := io.TeeReader(reader, hasher)
 
-	key := s.objectKey(endpoint, oid)
-	_, err := s.client.PutObject(ctx, &s3.PutObjectInput{
+	_, err = s.client.PutObject(ctx, &s3.PutObjectInput{
 		Bucket: aws.String(s.bucket),
 		Key:    aws.String(key),
 		Body:   tee,
@@ -181,9 +193,13 @@ func (s *S3) Put(ctx context.Context, endpoint, oid string, reader io.Reader) er
 
 // Size returns the size of the stored object in bytes.
 func (s *S3) Size(ctx context.Context, endpoint, oid string) (int64, error) {
+	key, err := s.objectKey(endpoint, oid)
+	if err != nil {
+		return 0, err
+	}
 	resp, err := s.client.HeadObject(ctx, &s3.HeadObjectInput{
 		Bucket: aws.String(s.bucket),
-		Key:    aws.String(s.objectKey(endpoint, oid)),
+		Key:    aws.String(key),
 	})
 	if err != nil {
 		if isS3NotFound(err) {
@@ -208,10 +224,14 @@ func (s *S3) PresignGet(ctx context.Context, endpoint, oid string, expiry time.D
 	if !s.presignedURLs {
 		return "", fmt.Errorf("presigned URLs are disabled")
 	}
+	key, err := s.objectKey(endpoint, oid)
+	if err != nil {
+		return "", err
+	}
 
 	resp, err := s.presigner.PresignGetObject(ctx, &s3.GetObjectInput{
 		Bucket: aws.String(s.bucket),
-		Key:    aws.String(s.objectKey(endpoint, oid)),
+		Key:    aws.String(key),
 	}, s3.WithPresignExpires(expiry))
 	if err != nil {
 		return "", fmt.Errorf("presigning GET for %s: %w", oid, err)
@@ -224,10 +244,14 @@ func (s *S3) PresignPut(ctx context.Context, endpoint, oid string, expiry time.D
 	if !s.presignedURLs {
 		return "", fmt.Errorf("presigned URLs are disabled")
 	}
+	key, err := s.objectKey(endpoint, oid)
+	if err != nil {
+		return "", err
+	}
 
 	resp, err := s.presigner.PresignPutObject(ctx, &s3.PutObjectInput{
 		Bucket: aws.String(s.bucket),
-		Key:    aws.String(s.objectKey(endpoint, oid)),
+		Key:    aws.String(key),
 	}, s3.WithPresignExpires(expiry))
 	if err != nil {
 		return "", fmt.Errorf("presigning PUT for %s: %w", oid, err)
@@ -235,14 +259,14 @@ func (s *S3) PresignPut(ctx context.Context, endpoint, oid string, expiry time.D
 	return resp.URL, nil
 }
 
-// objectKey returns the S3 object key for the given endpoint and OID, using the same two-level sharding as the local
-// filesystem adapter.
-func (s *S3) objectKey(endpoint, oid string) string {
-	sanitised := sanitise.Endpoint(endpoint)
-	if len(oid) < 4 {
-		return s.prefix + sanitised + "/" + oid
+// objectKey returns the sharded S3 object key for the given endpoint and OID, or ErrInvalidOID when oid is not a
+// SHA-256 hex digest.
+func (s *S3) objectKey(endpoint, oid string) (string, error) {
+	oid, err := normaliseOID(oid)
+	if err != nil {
+		return "", err
 	}
-	return s.prefix + sanitised + "/" + oid[:2] + "/" + oid[2:4] + "/" + oid
+	return s.prefix + sanitise.Endpoint(endpoint) + "/" + oid[:2] + "/" + oid[2:4] + "/" + oid, nil
 }
 
 // isS3NotFound reports whether the error indicates that the requested S3 object does not exist.

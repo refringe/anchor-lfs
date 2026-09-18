@@ -167,7 +167,7 @@ func (h *Handler) processUpload(r *http.Request, obj Object, baseURL string) Obj
 // validateObject returns an error message if the object is invalid, or an
 // empty string if it passes validation.
 func validateObject(obj Object) string {
-	if !isValidOID(obj.OID) {
+	if !storage.IsValidOID(obj.OID) {
 		return "invalid object id"
 	}
 	if obj.Size < 0 {

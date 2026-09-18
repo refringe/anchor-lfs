@@ -57,6 +57,7 @@ The job display names above are the required status check contexts in the reposi
 - Structured logging via `zerolog` (use `log` from `github.com/rs/zerolog/log`)
 - Interface-based adapters with compile-time checks: `var _ Interface = (*Impl)(nil)`
 - Dependency injection via config structs (e.g., `HandlerConfig`)
+- OID validation belongs in the storage package (`storage.IsValidOID` regexp guard, `storage.ErrInvalidOID`); handlers call it first for 422 responses, and the adapters validate again before touching a path or key
 - JSON via `encoding/json/v2` (`json.UnmarshalRead` for request bodies, `json.MarshalWrite`/`json.Marshal` for responses); use `omitzero` rather than `omitempty` on numeric and bool fields
 - Modern stdlib over hand-rolled code: `slices`, `cmp`, `min`/`max`, `sync.WaitGroup.Go`, and the `uuid` package (`go fix ./...` should report nothing)
 

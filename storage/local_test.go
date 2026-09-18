@@ -2,6 +2,7 @@ package storage
 
 import (
 	"bytes"
+	"errors"
 	"io"
 	"io/fs"
 	"os"
@@ -156,7 +157,10 @@ func TestSanitizeEndpointRejectsTraversal(t *testing.T) {
 func TestFilePathSharding(t *testing.T) {
 	store := NewLocal("/data")
 	oid := "4d7a214614ab2935c943f9e0ff69d22eadbb8f32b1258daaa5e2ca24d17e2393"
-	got := store.filePath("/org/repo", oid)
+	got, err := store.filePath("/org/repo", oid)
+	if err != nil {
+		t.Fatalf("filePath: %v", err)
+	}
 	want := "/data/org_repo/4d/7a/4d7a214614ab2935c943f9e0ff69d22eadbb8f32b1258daaa5e2ca24d17e2393"
 
 	// Use filepath separator-agnostic comparison.
@@ -187,5 +191,63 @@ func TestPutCleansUpOnFailure(t *testing.T) {
 	})
 	if err != nil && !os.IsNotExist(err) {
 		t.Fatalf("WalkDir: %v", err)
+	}
+}
+
+func TestRejectsInvalidOID(t *testing.T) {
+	store := testStore(t)
+	ctx := t.Context()
+	valid := "4d7a214614ab2935c943f9e0ff69d22eadbb8f32b1258daaa5e2ca24d17e2393"
+
+	invalid := []string{
+		"",
+		"..",
+		"../../../../../../../../../../../../../../../../../../../../etc/passwd",
+		"abc",
+		valid[:63],
+		valid + "0",
+		"zz7a214614ab2935c943f9e0ff69d22eadbb8f32b1258daaa5e2ca24d17e2393",
+		"4d/a214614ab2935c943f9e0ff69d22eadbb8f32b1258daaa5e2ca24d17e2393",
+		"4d7a214614ab2935c943f9e0ff69d22eadbb8f32b1258daaa5e2ca24d17e239\x00",
+	}
+	for _, oid := range invalid {
+		if _, err := store.Exists(ctx, "test", oid); !errors.Is(err, ErrInvalidOID) {
+			t.Errorf("Exists(%q) error = %v, want ErrInvalidOID", oid, err)
+		}
+		if _, _, err := store.Get(ctx, "test", oid); !errors.Is(err, ErrInvalidOID) {
+			t.Errorf("Get(%q) error = %v, want ErrInvalidOID", oid, err)
+		}
+		if _, err := store.Size(ctx, "test", oid); !errors.Is(err, ErrInvalidOID) {
+			t.Errorf("Size(%q) error = %v, want ErrInvalidOID", oid, err)
+		}
+		if err := store.Put(ctx, "test", oid, bytes.NewReader([]byte("data"))); !errors.Is(err, ErrInvalidOID) {
+			t.Errorf("Put(%q) error = %v, want ErrInvalidOID", oid, err)
+		}
+	}
+
+	entries, err := os.ReadDir(store.basePath)
+	if err != nil {
+		t.Fatalf("ReadDir: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Errorf("expected no files written for invalid OIDs, found %d entries", len(entries))
+	}
+}
+
+func TestUppercaseOIDResolvesToSameObject(t *testing.T) {
+	store := testStore(t)
+	ctx := t.Context()
+	data := []byte("hello world")
+	oid := testutil.SHA256Hex(data)
+
+	if err := store.Put(ctx, "test", strings.ToUpper(oid), bytes.NewReader(data)); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	exists, err := store.Exists(ctx, "test", oid)
+	if err != nil {
+		t.Fatalf("Exists: %v", err)
+	}
+	if !exists {
+		t.Fatal("expected object stored under uppercase OID to be found by lowercase OID")
 	}
 }

@@ -210,7 +210,7 @@ func TestS3PutHashMismatch(t *testing.T) {
 	}
 
 	// Verify the object was deleted after hash mismatch.
-	key := store.objectKey("test", badOID)
+	key, _ := store.objectKey("test", badOID)
 	if _, ok := client.objects[key]; ok {
 		t.Error("object should have been deleted after hash mismatch")
 	}
@@ -269,6 +269,7 @@ func TestS3ObjectKey(t *testing.T) {
 		endpoint string
 		oid      string
 		want     string
+		wantErr  error
 	}{
 		{
 			name:     "standard OID with prefix",
@@ -285,17 +286,34 @@ func TestS3ObjectKey(t *testing.T) {
 			want:     "org_repo/4d/7a/4d7a214614ab2935c943f9e0ff69d22eadbb8f32b1258daaa5e2ca24d17e2393",
 		},
 		{
-			name:     "short OID fallback",
+			name:     "uppercase OID is normalised",
+			prefix:   "lfs/",
+			endpoint: "test",
+			oid:      "4D7A214614AB2935C943F9E0FF69D22EADBB8F32B1258DAAA5E2CA24D17E2393",
+			want:     "lfs/test/4d/7a/4d7a214614ab2935c943f9e0ff69d22eadbb8f32b1258daaa5e2ca24d17e2393",
+		},
+		{
+			name:     "short OID rejected",
 			prefix:   "lfs/",
 			endpoint: "test",
 			oid:      "abc",
-			want:     "lfs/test/abc",
+			wantErr:  ErrInvalidOID,
+		},
+		{
+			name:     "traversal rejected",
+			prefix:   "lfs/",
+			endpoint: "test",
+			oid:      "../../../../../../../../../../../../../../../../../../../../etc/pw",
+			wantErr:  ErrInvalidOID,
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			store := newS3WithClient(nil, nil, "bucket", tt.prefix, false)
-			got := store.objectKey(tt.endpoint, tt.oid)
+			got, err := store.objectKey(tt.endpoint, tt.oid)
+			if !errors.Is(err, tt.wantErr) {
+				t.Fatalf("objectKey() error = %v, want %v", err, tt.wantErr)
+			}
 			if got != tt.want {
 				t.Errorf("objectKey() = %q, want %q", got, tt.want)
 			}
