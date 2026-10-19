@@ -263,14 +263,6 @@ func (h *Handler) UploadHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// The basic transfer spec requires application/octet-stream for uploads.
-	// An empty Content-Type is tolerated because some Git LFS clients omit it.
-	ct, _, _ := mime.ParseMediaType(r.Header.Get("Content-Type"))
-	if ct != "" && ct != "application/octet-stream" {
-		writeError(w, r, http.StatusUnsupportedMediaType, "expected Content-Type: application/octet-stream")
-		return
-	}
-
 	if r.ContentLength < 0 {
 		writeError(w, r, http.StatusBadRequest, "content-length header required")
 		return

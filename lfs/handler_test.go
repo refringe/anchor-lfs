@@ -225,20 +225,45 @@ func TestUploadMissingContentLength(t *testing.T) {
 	}
 }
 
-func TestUploadRejectsWrongContentType(t *testing.T) {
-	h, _, signer := testHandler(t)
+func TestUploadAcceptsAnyContentType(t *testing.T) {
+	tests := []struct {
+		name        string
+		contentType string
+	}{
+		{"png", "image/png"},
+		{"text with charset", "text/plain; charset=utf-8"},
+		{"zip", "application/zip"},
+		{"octet-stream", "application/octet-stream"},
+		{"empty", ""},
+	}
 
-	oid := "deadbeef00000000000000000000000000000000000000000000000000000000"
-	uri := signedURI(signer, "/org/repo/objects/"+oid)
-	req := httptest.NewRequestWithContext(context.Background(), "PUT", uri, strings.NewReader("data"))
-	req.ContentLength = 4
-	req.Header.Set("Content-Type", "application/json")
-	req.SetPathValue("oid", oid)
-	w := httptest.NewRecorder()
-	h.UploadHandler(w, req)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h, store, signer := testHandler(t)
 
-	if w.Code != http.StatusUnsupportedMediaType {
-		t.Fatalf("expected 415, got %d", w.Code)
+			data := []byte("content sent as " + tt.name)
+			oid := testutil.SHA256Hex(data)
+			uri := signedURI(signer, "/org/repo/objects/"+oid)
+			req := httptest.NewRequestWithContext(context.Background(), "PUT", uri, bytes.NewReader(data))
+			req.ContentLength = int64(len(data))
+			if tt.contentType != "" {
+				req.Header.Set("Content-Type", tt.contentType)
+			}
+			req.SetPathValue("oid", oid)
+			w := httptest.NewRecorder()
+			h.UploadHandler(w, req)
+
+			if w.Code != http.StatusOK {
+				t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+			}
+			exists, err := store.Exists(context.Background(), "/org/repo", oid)
+			if err != nil {
+				t.Fatalf("Exists: %v", err)
+			}
+			if !exists {
+				t.Fatal("object was not stored")
+			}
+		})
 	}
 }
 

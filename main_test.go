@@ -9,12 +9,16 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"slices"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/refringe/anchor-lfs/auth"
 	"github.com/refringe/anchor-lfs/config"
+	"github.com/refringe/anchor-lfs/internal/testutil"
 	"github.com/refringe/anchor-lfs/lfs"
 	"github.com/refringe/anchor-lfs/storage"
 )
@@ -72,7 +76,9 @@ func TestLoadOrGenerateSigningKeyRejectsTooShort(t *testing.T) {
 	}
 }
 
-func TestIntegrationRouting(t *testing.T) {
+// newIntegrationServer starts a test server with the LFS routes for the /org/repo endpoint registered.
+func newIntegrationServer(t *testing.T) (*httptest.Server, *storage.Local) {
+	t.Helper()
 	dir := t.TempDir()
 	store := storage.NewLocal(dir)
 	ep := &config.Endpoint{
@@ -103,9 +109,18 @@ func TestIntegrationRouting(t *testing.T) {
 	mux.Handle(fmt.Sprintf("GET %s/objects/{oid}", ep.Path), http.HandlerFunc(handler.DownloadHandler))
 	mux.Handle(fmt.Sprintf("PUT %s/objects/{oid}", ep.Path), http.HandlerFunc(handler.UploadHandler))
 	mux.Handle(fmt.Sprintf("POST %s/objects/verify", ep.Path), http.HandlerFunc(handler.VerifyHandler))
+	mux.Handle(fmt.Sprintf("POST %s/locks", ep.Path), http.HandlerFunc(handler.CreateLockHandler))
+	mux.Handle(fmt.Sprintf("GET %s/locks", ep.Path), http.HandlerFunc(handler.ListLocksHandler))
+	mux.Handle(fmt.Sprintf("POST %s/locks/verify", ep.Path), http.HandlerFunc(handler.VerifyLocksHandler))
+	mux.Handle(fmt.Sprintf("POST %s/locks/{id}/unlock", ep.Path), http.HandlerFunc(handler.UnlockHandler))
 
 	srv := httptest.NewServer(mux)
-	defer srv.Close()
+	t.Cleanup(srv.Close)
+	return srv, store
+}
+
+func TestIntegrationRouting(t *testing.T) {
+	srv, _ := newIntegrationServer(t)
 
 	ctx := t.Context()
 	client := srv.Client()
@@ -219,5 +234,69 @@ func TestIntegrationRouting(t *testing.T) {
 	_ = resp.Body.Close()
 	if resp.StatusCode != http.StatusNotFound {
 		t.Fatalf("unknown path: expected 404, got %d", resp.StatusCode)
+	}
+}
+
+func TestIntegrationGitLFSClientPush(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping git-lfs client test in short mode")
+	}
+	for _, bin := range []string{"git", "git-lfs"} {
+		if _, err := exec.LookPath(bin); err != nil {
+			t.Skipf("%s not found on PATH", bin)
+		}
+	}
+
+	srv, store := newIntegrationServer(t)
+
+	home := t.TempDir()
+	env := slices.DeleteFunc(os.Environ(), func(kv string) bool {
+		return strings.HasPrefix(kv, "GIT_") || strings.HasPrefix(kv, "HOME=") || strings.HasPrefix(kv, "XDG_CONFIG_HOME=")
+	})
+	env = append(env, "HOME="+home, "XDG_CONFIG_HOME="+home, "GIT_CONFIG_NOSYSTEM=1", "GIT_TERMINAL_PROMPT=0")
+
+	git := func(dir string, args ...string) {
+		t.Helper()
+		cmd := exec.CommandContext(t.Context(), "git", args...) //nolint:gosec // arguments are fixed strings in this test
+		cmd.Dir = dir
+		cmd.Env = env
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, out)
+		}
+	}
+
+	remote := t.TempDir()
+	git(remote, "init", "--bare")
+
+	repo := t.TempDir()
+	git(repo, "init")
+	git(repo, "config", "user.name", "Anchor Test")
+	git(repo, "config", "user.email", "test@example.com")
+	git(repo, "config", "lfs.url", srv.URL+"/org/repo")
+	git(repo, "remote", "add", "origin", remote)
+	git(repo, "lfs", "install", "--local")
+	git(repo, "lfs", "track", "*.txt", "*.png")
+
+	files := map[string][]byte{
+		"notes.txt": []byte("plain text tracked by Git LFS\n"),
+		"image.png": append([]byte("\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR"), make([]byte, 64)...),
+	}
+	for name, data := range files {
+		if err := os.WriteFile(filepath.Join(repo, name), data, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	git(repo, "add", ".gitattributes", "notes.txt", "image.png")
+	git(repo, "commit", "-m", "add LFS files")
+	git(repo, "lfs", "push", "--all", "origin")
+
+	for name, data := range files {
+		exists, err := store.Exists(t.Context(), "/org/repo", testutil.SHA256Hex(data))
+		if err != nil {
+			t.Fatalf("Exists(%s): %v", name, err)
+		}
+		if !exists {
+			t.Errorf("%s was not stored", name)
+		}
 	}
 }
