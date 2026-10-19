@@ -540,6 +540,39 @@ github_api_url = "https://custom-proxy.example.com/github/api/"
 	}
 }
 
+func TestLoadRejectsMalformedEndpointPath(t *testing.T) {
+	tests := []struct {
+		name     string
+		endpoint string
+	}{
+		{"trailing slash", "/org/repo/"},
+		{"missing leading slash", "org/repo"},
+		{"empty segment", "/org//repo"},
+		{"dot segment", "/org/./repo"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := writeConfig(t, `
+[[endpoints]]
+name = "Malformed"
+url = "https://github.com/org/repo"
+endpoint = "`+tt.endpoint+`"
+visibility = "public"
+authentication = "none"
+`)
+
+			_, err := Load(path)
+			if err == nil {
+				t.Fatalf("expected error for endpoint path %q", tt.endpoint)
+			}
+			if !strings.Contains(err.Error(), `"`+tt.endpoint+`"`) {
+				t.Errorf("error %q does not name the endpoint path %q", err, tt.endpoint)
+			}
+		})
+	}
+}
+
 func TestLoadUnsafeEndpointPath(t *testing.T) {
 	path := writeConfig(t, `
 [[endpoints]]

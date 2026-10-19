@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"path"
 	"strconv"
 	"strings"
 	"time"
@@ -347,6 +348,12 @@ func (c *Config) validate() error {
 		}
 		if ep.Path == "" {
 			return fmt.Errorf("endpoint %q: missing endpoint path", ep.Name)
+		}
+		if !strings.HasPrefix(ep.Path, "/") {
+			return fmt.Errorf("endpoint %q: path %q must start with \"/\"", ep.Name, ep.Path)
+		}
+		if clean := path.Clean(ep.Path); clean != ep.Path {
+			return fmt.Errorf("endpoint %q: path %q is not a clean path; use %q", ep.Name, ep.Path, clean)
 		}
 		if _, exists := paths[ep.Path]; exists {
 			return fmt.Errorf("endpoint %q: duplicate endpoint path %q", ep.Name, ep.Path)
