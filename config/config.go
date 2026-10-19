@@ -342,6 +342,7 @@ func (c *Config) validate() error {
 		"health": {},
 	}
 	paths := make(map[string]struct{}, len(c.Endpoints))
+	dirs := make(map[string]string, len(c.Endpoints))
 	for _, ep := range c.Endpoints {
 		if ep.Name == "" {
 			return fmt.Errorf("endpoint missing name")
@@ -362,9 +363,14 @@ func (c *Config) validate() error {
 		if _, reserved := reservedPaths[strings.TrimLeft(ep.Path, "/")]; reserved {
 			return fmt.Errorf("endpoint %q: path %q is reserved", ep.Name, ep.Path)
 		}
-		if sanitise.Endpoint(ep.Path) == sanitise.InvalidEndpoint {
+		dir := sanitise.Endpoint(ep.Path)
+		if dir == sanitise.InvalidEndpoint {
 			return fmt.Errorf("endpoint %q: path %q contains characters that are unsafe for storage directories", ep.Name, ep.Path)
 		}
+		if other, taken := dirs[strings.ToLower(dir)]; taken {
+			return fmt.Errorf("endpoint %q: path %q uses the same storage directory %q as endpoint %q", ep.Name, ep.Path, dir, other)
+		}
+		dirs[strings.ToLower(dir)] = ep.Name
 		auth := strings.ToLower(ep.Authentication)
 		if auth != authGitHub && auth != "none" {
 			return fmt.Errorf("endpoint %q: unknown authentication %q", ep.Name, ep.Authentication)

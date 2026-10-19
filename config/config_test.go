@@ -573,6 +573,45 @@ authentication = "none"
 	}
 }
 
+func TestLoadRejectsCollidingStorageDirectories(t *testing.T) {
+	tests := []struct {
+		name   string
+		first  string
+		second string
+	}{
+		{"slash and underscore", "/org/repo", "/org_repo"},
+		{"case only", "/org/repo", "/Org/Repo"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := writeConfig(t, `
+[[endpoints]]
+name = "First"
+url = "https://github.com/org/repo"
+endpoint = "`+tt.first+`"
+visibility = "public"
+authentication = "none"
+
+[[endpoints]]
+name = "Second"
+url = "https://github.com/org/other"
+endpoint = "`+tt.second+`"
+visibility = "public"
+authentication = "none"
+`)
+
+			_, err := Load(path)
+			if err == nil {
+				t.Fatalf("expected error for %q and %q sharing a storage directory", tt.first, tt.second)
+			}
+			if !strings.Contains(err.Error(), "same storage directory") {
+				t.Errorf("unexpected error: %v", err)
+			}
+		})
+	}
+}
+
 func TestLoadUnsafeEndpointPath(t *testing.T) {
 	path := writeConfig(t, `
 [[endpoints]]

@@ -21,6 +21,7 @@ import (
 
 	"github.com/refringe/anchor-lfs/auth"
 	"github.com/refringe/anchor-lfs/config"
+	"github.com/refringe/anchor-lfs/internal/sanitise"
 	"github.com/refringe/anchor-lfs/lfs"
 	"github.com/refringe/anchor-lfs/middleware"
 	"github.com/refringe/anchor-lfs/storage"
@@ -176,6 +177,7 @@ func main() {
 		log.Info().
 			Str("name", ep.Name).
 			Str("path", prefix).
+			Str("directory", sanitise.Endpoint(prefix)).
 			Str("auth", ep.Authentication).
 			Str("visibility", ep.Visibility).
 			Msg("registered endpoint")
