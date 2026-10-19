@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -117,6 +118,39 @@ func newIntegrationServer(t *testing.T) (*httptest.Server, *storage.Local) {
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
 	return srv, store
+}
+
+func TestEnsureWritableDirCreatesMissingDirectory(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "nested", "data")
+
+	if err := ensureWritableDir(dir); err != nil {
+		t.Fatalf("ensureWritableDir: %v", err)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("directory not created: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("expected an empty directory, found %d entries", len(entries))
+	}
+}
+
+func TestEnsureWritableDirRejectsReadOnlyDirectory(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("directory permission bits are not enforced on Windows")
+	}
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses directory permission checks")
+	}
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o500); err != nil { //nolint:gosec // directories need the execute bit to be traversable
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) }) //nolint:gosec // directories need the execute bit to be traversable
+
+	if err := ensureWritableDir(dir); err == nil {
+		t.Fatal("expected an error for a read-only directory")
+	}
 }
 
 func TestIntegrationRouting(t *testing.T) {

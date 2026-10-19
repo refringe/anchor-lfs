@@ -21,6 +21,8 @@ A lightweight, standalone [Git LFS](https://git-lfs.com/) server written in Go t
 
 ```bash
 cp config.toml.example config.toml
+# Linux hosts only: the container runs as uid 100, gid 101 and must be able to write ./data
+mkdir -p data && sudo chown 100:101 data
 # Edit config.toml with your endpoints, then:
 docker compose up -d
 ```

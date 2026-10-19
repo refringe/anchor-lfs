@@ -53,6 +53,10 @@ func main() {
 		Str("built", date).
 		Msg("starting anchor-lfs")
 
+	if err := ensureWritableDir(cfg.Options.DataDirectory); err != nil {
+		log.Fatal().Err(err).Int("uid", os.Getuid()).Int("gid", os.Getgid()).Msg("checking data directory")
+	}
+
 	var store storage.Adapter
 	switch cfg.Storage.Backend {
 	case config.StorageS3:
@@ -240,6 +244,23 @@ func main() {
 
 	// Zero signing key material in memory.
 	_ = signer.Close()
+}
+
+// ensureWritableDir creates dir if it is missing and confirms the current process can create files in it.
+func ensureWritableDir(dir string) error {
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		return fmt.Errorf("creating data directory %q: %w", dir, err)
+	}
+	f, err := os.CreateTemp(dir, ".write-check-*")
+	if err != nil {
+		return fmt.Errorf("data directory %q is not writable: %w", dir, err)
+	}
+	name := f.Name()
+	_ = f.Close()
+	if err := os.Remove(name); err != nil {
+		return fmt.Errorf("removing write check file: %w", err)
+	}
+	return nil
 }
 
 // signingKeyFile is the name of the auto-generated signing key file within the data directory.
