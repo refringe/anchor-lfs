@@ -133,8 +133,13 @@ func Load(path string) (*Config, error) {
 	}
 
 	var cfg Config
-	if err := toml.Unmarshal(data, &cfg); err != nil {
+	md, err := toml.Decode(string(data), &cfg)
+	if err != nil {
 		return nil, fmt.Errorf("parsing config: %w", err)
+	}
+	if unknown := unrecognisedKeys(md); len(unknown) > 0 {
+		return nil, fmt.Errorf("parsing config: unrecognised keys %s (check the spelling against config.toml.example)",
+			strings.Join(unknown, ", "))
 	}
 
 	cfg.applyDefaults()
@@ -167,6 +172,19 @@ func Load(path string) (*Config, error) {
 	}
 
 	return &cfg, nil
+}
+
+// unrecognisedKeys lists each undecoded key once, leaving out tables whose own keys are listed.
+func unrecognisedKeys(md toml.MetaData) []string {
+	var keys []string
+	for _, key := range md.Undecoded() {
+		if name := key.String(); !slices.Contains(keys, name) {
+			keys = append(keys, name)
+		}
+	}
+	return slices.DeleteFunc(slices.Clone(keys), func(table string) bool {
+		return slices.ContainsFunc(keys, func(key string) bool { return strings.HasPrefix(key, table+".") })
+	})
 }
 
 func (c *Config) applyDefaults() {

@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
@@ -54,6 +55,81 @@ authentication = "github"
 	}
 	if ep.GitHubRepo != "repo" {
 		t.Errorf("GitHubRepo = %q, want %q", ep.GitHubRepo, "repo")
+	}
+}
+
+func TestLoadUnrecognisedKeys(t *testing.T) {
+	const endpoint = `
+[[endpoints]]
+name = "Test"
+url = "https://github.com/org/repo"
+endpoint = "/org/repo"
+visibility = "public"
+authentication = "none"
+`
+	const misspelledEndpoint = `
+[[endpoints]]
+name = "Other"
+url = "https://github.com/org/other"
+endpoint = "/org/other"
+visibilty = "public"
+authentication = "none"
+`
+	tests := []struct {
+		name   string
+		config string
+		want   string
+	}{
+		{name: "misspelled section", config: "[option]\nlisten_addr = \":8080\"\n" + endpoint, want: "option.listen_addr"},
+		{name: "options key", config: "[options]\ndata_dir = \"/data\"\n" + endpoint, want: "options.data_dir"},
+		{name: "storage key", config: "[storage]\ns3_bukket = \"lfs\"\n" + endpoint, want: "storage.s3_bukket"},
+		{name: "endpoint key", config: endpoint + misspelledEndpoint + misspelledEndpoint, want: "endpoints.visibilty"},
+		{name: "empty table", config: "[extra]\n" + endpoint, want: "extra"},
+		{name: "top-level key", config: "listen_address = \":8080\"\n" + endpoint, want: "listen_address"},
+		{
+			name:   "several keys",
+			config: "[options]\ndata_dir = \"/data\"\n" + endpoint + misspelledEndpoint,
+			want:   "options.data_dir, endpoints.visibilty",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := Load(writeConfig(t, tt.config))
+			if err == nil {
+				t.Fatal("expected error")
+			}
+			if !strings.Contains(err.Error(), "unrecognised keys "+tt.want+" (") {
+				t.Errorf("error %q does not list exactly %q", err, tt.want)
+			}
+		})
+	}
+}
+
+func TestLoadExampleConfig(t *testing.T) {
+	data, err := os.ReadFile("../config.toml.example")
+	if err != nil {
+		t.Fatal(err)
+	}
+	commentedSetting := regexp.MustCompile(`(?m)^#(\[|[a-z_]+ = )`)
+
+	tests := []struct {
+		name          string
+		config        string
+		wantEndpoints int
+	}{
+		{name: "as shipped", config: string(data), wantEndpoints: 1},
+		{name: "every setting enabled", config: commentedSetting.ReplaceAllString(string(data), "$1"), wantEndpoints: 4},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg, err := Load(writeConfig(t, tt.config))
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			if len(cfg.Endpoints) != tt.wantEndpoints {
+				t.Errorf("got %d endpoints, want %d", len(cfg.Endpoints), tt.wantEndpoints)
+			}
+		})
 	}
 }
 
