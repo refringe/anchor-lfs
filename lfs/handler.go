@@ -287,7 +287,7 @@ func (h *Handler) UploadHandler(w http.ResponseWriter, r *http.Request) {
 	// Enforce the upload size limit at the reader level.
 	body := http.MaxBytesReader(w, r.Body, h.maxUploadSize)
 
-	if err := h.store.Put(r.Context(), h.endpoint.Path, oid, body); err != nil {
+	if err := h.store.Put(r.Context(), h.endpoint.Path, oid, body, r.ContentLength); err != nil {
 		if errors.Is(err, storage.ErrHashMismatch) {
 			writeError(w, r, http.StatusBadRequest, "SHA-256 hash mismatch")
 			return

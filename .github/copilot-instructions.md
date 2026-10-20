@@ -32,7 +32,7 @@ Five workflows run on every push/PR to `develop` and `main` (in `.github/workflo
 
 1. **Format** (`format.yml`): jobs `Go Format` (`make fmt-check`) and `Prettier` (`make prettier-check`)
 2. **Quality** (`quality.yml`): job `Lint` — `go mod tidy` cleanliness check, no-`replace`-directive check, `make vet`, `make lint`
-3. **Tests** (`tests.yml`): jobs `Test` (`make test`) and `Coverage` (`make test-cover`, uploads `coverage.out` as an artifact)
+3. **Tests** (`tests.yml`): jobs `Test` (`make test`), `Coverage` (`make test-cover`, uploads `coverage.out` as an artifact) and `S3 Integration` (runs `TestS3Integration*` against a RustFS container)
 4. **Vulnerability** (`vulnerability.yml`): job `Vulnerability Check` (`make vulncheck`)
 5. **CodeQL** (`codeql.yml`): job `Analyse`, matrix over `actions` and `go`
 
@@ -81,7 +81,8 @@ The job display names above are the required status check contexts in the reposi
 │   ├── local_unix.go       # Unix-specific disk space check (syscall.Statfs)
 │   ├── local_windows.go    # Windows-specific disk space check
 │   ├── local_test.go
-│   ├── s3.go               # S3-compatible storage adapter
+│   ├── s3.go               # S3-compatible storage adapter (S3 proxies, PresignedS3 presigns)
+│   ├── s3_integration_test.go # Runs against a real S3 server when ANCHOR_LFS_TEST_S3_ENDPOINT is set
 │   └── s3_test.go
 ├── lfs/
 │   ├── handler.go          # HTTP handlers: Batch, Download, Upload, Verify, Lock CRUD

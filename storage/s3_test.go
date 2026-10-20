@@ -20,16 +20,25 @@ import (
 
 // mockS3Client implements s3API for testing.
 type mockS3Client struct {
-	objects map[string][]byte
+	objects      map[string][]byte
+	uploads      map[string]map[int32][]byte
+	nextUploadID int
 
-	headErr   error
-	getErr    error
-	putErr    error
-	deleteErr error
+	headErr error
+	getErr  error
+	putErr  error
 }
 
 func newMockS3Client() *mockS3Client {
-	return &mockS3Client{objects: make(map[string][]byte)}
+	return &mockS3Client{objects: make(map[string][]byte), uploads: make(map[string]map[int32][]byte)}
+}
+
+// readSeekableBody reads body, rejecting unseekable bodies as the SDK does over plain HTTP.
+func readSeekableBody(body io.Reader) ([]byte, error) {
+	if _, ok := body.(io.Seeker); !ok {
+		return nil, errors.New("unseekable stream is not supported without TLS and trailing checksum")
+	}
+	return io.ReadAll(body)
 }
 
 func (m *mockS3Client) HeadObject(_ context.Context, input *s3.HeadObjectInput, _ ...func(*s3.Options)) (*s3.HeadObjectOutput, error) {
@@ -65,22 +74,53 @@ func (m *mockS3Client) PutObject(_ context.Context, input *s3.PutObjectInput, _ 
 	if m.putErr != nil {
 		return nil, m.putErr
 	}
-	key := aws.ToString(input.Key)
-	data, err := io.ReadAll(input.Body)
+	data, err := readSeekableBody(input.Body)
 	if err != nil {
 		return nil, err
 	}
-	m.objects[key] = data
+	m.objects[aws.ToString(input.Key)] = data
 	return &s3.PutObjectOutput{}, nil
 }
 
-func (m *mockS3Client) DeleteObject(_ context.Context, input *s3.DeleteObjectInput, _ ...func(*s3.Options)) (*s3.DeleteObjectOutput, error) {
-	if m.deleteErr != nil {
-		return nil, m.deleteErr
+func (m *mockS3Client) CreateMultipartUpload(_ context.Context, _ *s3.CreateMultipartUploadInput, _ ...func(*s3.Options)) (*s3.CreateMultipartUploadOutput, error) {
+	m.nextUploadID++
+	id := fmt.Sprintf("upload-%d", m.nextUploadID)
+	m.uploads[id] = make(map[int32][]byte)
+	return &s3.CreateMultipartUploadOutput{UploadId: aws.String(id)}, nil
+}
+
+func (m *mockS3Client) UploadPart(_ context.Context, input *s3.UploadPartInput, _ ...func(*s3.Options)) (*s3.UploadPartOutput, error) {
+	parts, ok := m.uploads[aws.ToString(input.UploadId)]
+	if !ok {
+		return nil, &s3types.NoSuchUpload{Message: aws.String("no such upload")}
 	}
-	key := aws.ToString(input.Key)
-	delete(m.objects, key)
-	return &s3.DeleteObjectOutput{}, nil
+	data, err := readSeekableBody(input.Body)
+	if err != nil {
+		return nil, err
+	}
+	number := aws.ToInt32(input.PartNumber)
+	parts[number] = data
+	return &s3.UploadPartOutput{ETag: aws.String(fmt.Sprintf("etag-%d", number))}, nil
+}
+
+func (m *mockS3Client) CompleteMultipartUpload(_ context.Context, input *s3.CompleteMultipartUploadInput, _ ...func(*s3.Options)) (*s3.CompleteMultipartUploadOutput, error) {
+	id := aws.ToString(input.UploadId)
+	parts, ok := m.uploads[id]
+	if !ok {
+		return nil, &s3types.NoSuchUpload{Message: aws.String("no such upload")}
+	}
+	var data []byte
+	for _, part := range input.MultipartUpload.Parts {
+		data = append(data, parts[aws.ToInt32(part.PartNumber)]...)
+	}
+	m.objects[aws.ToString(input.Key)] = data
+	delete(m.uploads, id)
+	return &s3.CompleteMultipartUploadOutput{}, nil
+}
+
+func (m *mockS3Client) AbortMultipartUpload(_ context.Context, input *s3.AbortMultipartUploadInput, _ ...func(*s3.Options)) (*s3.AbortMultipartUploadOutput, error) {
+	delete(m.uploads, aws.ToString(input.UploadId))
+	return &s3.AbortMultipartUploadOutput{}, nil
 }
 
 // mockPresigner implements s3Presigner for testing.
@@ -107,12 +147,21 @@ func (m *mockPresigner) PresignPutObject(_ context.Context, input *s3.PutObjectI
 	}, nil
 }
 
+// unseekable hides every method of r except Read.
+func unseekable(r io.Reader) io.Reader {
+	return struct{ io.Reader }{r}
+}
+
 func testS3Store(t *testing.T) (*S3, *mockS3Client) {
 	t.Helper()
 	client := newMockS3Client()
-	presigner := &mockPresigner{}
-	store := newS3WithClient(client, presigner, "test-bucket", "lfs/", true)
-	return store, client
+	return &S3{client: client, bucket: "test-bucket", prefix: "lfs/"}, client
+}
+
+func testPresignedS3Store(t *testing.T, presigner *mockPresigner) *PresignedS3 {
+	t.Helper()
+	store, _ := testS3Store(t)
+	return &PresignedS3{S3: store, presigner: presigner}
 }
 
 func TestS3Exists(t *testing.T) {
@@ -158,61 +207,90 @@ func TestS3Exists(t *testing.T) {
 	}
 }
 
+// putSizes covers objects below, at, and above the multipart threshold.
+var putSizes = []struct {
+	name string
+	size int64
+}{
+	{"single part", 11},
+	{"exactly one part", s3PartSize},
+	{"multipart", 2*s3PartSize + 123},
+}
+
 func TestS3PutAndGet(t *testing.T) {
-	store, _ := testS3Store(t)
-	data := []byte("hello world")
-	oid := testutil.SHA256Hex(data)
-	ctx := t.Context()
+	for _, tt := range putSizes {
+		t.Run(tt.name, func(t *testing.T) {
+			store, client := testS3Store(t)
+			data := randomBytes(int(tt.size))
+			oid := testutil.SHA256Hex(data)
+			ctx := t.Context()
 
-	if err := store.Put(ctx, "test", oid, bytes.NewReader(data)); err != nil {
-		t.Fatalf("Put: %v", err)
-	}
+			if err := store.Put(ctx, "test", oid, unseekable(bytes.NewReader(data)), tt.size); err != nil {
+				t.Fatalf("Put: %v", err)
+			}
+			if len(client.uploads) != 0 {
+				t.Errorf("%d multipart uploads left open", len(client.uploads))
+			}
 
-	exists, err := store.Exists(ctx, "test", oid)
-	if err != nil {
-		t.Fatalf("Exists: %v", err)
-	}
-	if !exists {
-		t.Fatal("expected object to exist")
-	}
+			reader, size, err := store.Get(ctx, "test", oid)
+			if err != nil {
+				t.Fatalf("Get: %v", err)
+			}
+			defer func() { _ = reader.Close() }()
 
-	reader, size, err := store.Get(ctx, "test", oid)
-	if err != nil {
-		t.Fatalf("Get: %v", err)
-	}
-	defer func() { _ = reader.Close() }()
-
-	if size != int64(len(data)) {
-		t.Errorf("Get size = %d, want %d", size, len(data))
-	}
-
-	got, err := io.ReadAll(reader)
-	if err != nil {
-		t.Fatalf("ReadAll: %v", err)
-	}
-	if !bytes.Equal(got, data) {
-		t.Fatal("data mismatch")
+			if size != tt.size {
+				t.Errorf("Get size = %d, want %d", size, tt.size)
+			}
+			got, err := io.ReadAll(reader)
+			if err != nil {
+				t.Fatalf("ReadAll: %v", err)
+			}
+			if !bytes.Equal(got, data) {
+				t.Fatal("data mismatch")
+			}
+		})
 	}
 }
 
 func TestS3PutHashMismatch(t *testing.T) {
-	store, client := testS3Store(t)
-	data := []byte("hello world")
-	badOID := "0000000000000000000000000000000000000000000000000000000000000000"
-	ctx := t.Context()
+	for _, tt := range putSizes {
+		t.Run(tt.name, func(t *testing.T) {
+			store, client := testS3Store(t)
+			data := randomBytes(int(tt.size))
+			badOID := "0000000000000000000000000000000000000000000000000000000000000000"
 
-	err := store.Put(ctx, "test", badOID, bytes.NewReader(data))
-	if err == nil {
-		t.Fatal("expected error for hash mismatch")
+			err := store.Put(t.Context(), "test", badOID, unseekable(bytes.NewReader(data)), tt.size)
+			if !errors.Is(err, ErrHashMismatch) {
+				t.Fatalf("Put error = %v, want ErrHashMismatch", err)
+			}
+			if len(client.objects) != 0 {
+				t.Error("object with mismatched hash was written")
+			}
+			if len(client.uploads) != 0 {
+				t.Errorf("%d multipart uploads left open", len(client.uploads))
+			}
+		})
 	}
-	if !errors.Is(err, ErrHashMismatch) {
-		t.Errorf("expected ErrHashMismatch, got %v", err)
-	}
+}
 
-	// Verify the object was deleted after hash mismatch.
-	key, _ := store.objectKey("test", badOID)
-	if _, ok := client.objects[key]; ok {
-		t.Error("object should have been deleted after hash mismatch")
+func TestS3PutShortBody(t *testing.T) {
+	for _, tt := range putSizes {
+		t.Run(tt.name, func(t *testing.T) {
+			store, client := testS3Store(t)
+			data := randomBytes(int(tt.size))
+			oid := testutil.SHA256Hex(data)
+
+			err := store.Put(t.Context(), "test", oid, unseekable(bytes.NewReader(data[:len(data)-1])), tt.size)
+			if !errors.Is(err, io.ErrUnexpectedEOF) {
+				t.Fatalf("Put error = %v, want io.ErrUnexpectedEOF", err)
+			}
+			if len(client.objects) != 0 {
+				t.Error("object from a short body was written")
+			}
+			if len(client.uploads) != 0 {
+				t.Errorf("%d multipart uploads left open", len(client.uploads))
+			}
+		})
 	}
 }
 
@@ -230,7 +308,7 @@ func TestS3Size(t *testing.T) {
 	oid := testutil.SHA256Hex(data)
 	ctx := t.Context()
 
-	if err := store.Put(ctx, "test", oid, bytes.NewReader(data)); err != nil {
+	if err := store.Put(ctx, "test", oid, bytes.NewReader(data), int64(len(data))); err != nil {
 		t.Fatalf("Put: %v", err)
 	}
 
@@ -309,7 +387,7 @@ func TestS3ObjectKey(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			store := newS3WithClient(nil, nil, "bucket", tt.prefix, false)
+			store := &S3{bucket: "bucket", prefix: tt.prefix}
 			got, err := store.objectKey(tt.endpoint, tt.oid)
 			if !errors.Is(err, tt.wantErr) {
 				t.Fatalf("objectKey() error = %v, want %v", err, tt.wantErr)
@@ -322,9 +400,7 @@ func TestS3ObjectKey(t *testing.T) {
 }
 
 func TestS3PresignGet(t *testing.T) {
-	client := newMockS3Client()
-	presigner := &mockPresigner{}
-	store := newS3WithClient(client, presigner, "test-bucket", "lfs/", true)
+	store := testPresignedS3Store(t, &mockPresigner{})
 
 	href, err := store.PresignGet(t.Context(), "/org/repo", "4d7a214614ab2935c943f9e0ff69d22eadbb8f32b1258daaa5e2ca24d17e2393", 10*time.Minute)
 	if err != nil {
@@ -336,9 +412,7 @@ func TestS3PresignGet(t *testing.T) {
 }
 
 func TestS3PresignPut(t *testing.T) {
-	client := newMockS3Client()
-	presigner := &mockPresigner{}
-	store := newS3WithClient(client, presigner, "test-bucket", "lfs/", true)
+	store := testPresignedS3Store(t, &mockPresigner{})
 
 	href, err := store.PresignPut(t.Context(), "/org/repo", "4d7a214614ab2935c943f9e0ff69d22eadbb8f32b1258daaa5e2ca24d17e2393", 10*time.Minute)
 	if err != nil {
@@ -349,29 +423,31 @@ func TestS3PresignPut(t *testing.T) {
 	}
 }
 
-func TestS3PresignDisabled(t *testing.T) {
-	client := newMockS3Client()
-	presigner := &mockPresigner{}
-	store := newS3WithClient(client, presigner, "test-bucket", "lfs/", false)
-
-	_, err := store.PresignGet(t.Context(), "/org/repo", "4d7a214614ab2935c943f9e0ff69d22eadbb8f32b1258daaa5e2ca24d17e2393", 10*time.Minute)
-	if err == nil {
-		t.Fatal("expected error when presigned URLs are disabled")
-	}
-
-	_, err = store.PresignPut(t.Context(), "/org/repo", "4d7a214614ab2935c943f9e0ff69d22eadbb8f32b1258daaa5e2ca24d17e2393", 10*time.Minute)
-	if err == nil {
-		t.Fatal("expected error when presigned URLs are disabled")
+func TestNewS3PresignedURLs(t *testing.T) {
+	for _, presigned := range []bool{false, true} {
+		t.Run(fmt.Sprintf("presigned=%t", presigned), func(t *testing.T) {
+			store, err := NewS3(t.Context(), S3Config{
+				Bucket:          "test-bucket",
+				Region:          "us-east-1",
+				AccessKeyID:     "id",
+				SecretAccessKey: "secret",
+				PresignedURLs:   presigned,
+			})
+			if err != nil {
+				t.Fatalf("NewS3: %v", err)
+			}
+			if _, ok := store.(PresignedURLProvider); ok != presigned {
+				t.Errorf("adapter implements PresignedURLProvider = %t, want %t", ok, presigned)
+			}
+		})
 	}
 }
 
 func TestS3PresignError(t *testing.T) {
-	client := newMockS3Client()
-	presigner := &mockPresigner{
+	store := testPresignedS3Store(t, &mockPresigner{
 		getErr: fmt.Errorf("presign failure"),
 		putErr: fmt.Errorf("presign failure"),
-	}
-	store := newS3WithClient(client, presigner, "test-bucket", "lfs/", true)
+	})
 
 	_, err := store.PresignGet(t.Context(), "/org/repo", "4d7a214614ab2935c943f9e0ff69d22eadbb8f32b1258daaa5e2ca24d17e2393", 10*time.Minute)
 	if err == nil {

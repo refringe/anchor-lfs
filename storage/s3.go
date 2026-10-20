@@ -1,11 +1,13 @@
 package storage
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"hash"
 	"io"
 	"io/fs"
 	"math"
@@ -22,10 +24,17 @@ import (
 	"github.com/refringe/anchor-lfs/internal/sanitise"
 )
 
+// s3PartSize is the default part size for uploads, and s3MaxParts is S3's limit on parts per multipart upload.
+const (
+	s3PartSize int64 = 8 << 20
+	s3MaxParts int64 = 10000
+)
+
 // Compile-time interface checks.
 var (
 	_ Adapter              = (*S3)(nil)
-	_ PresignedURLProvider = (*S3)(nil)
+	_ Adapter              = (*PresignedS3)(nil)
+	_ PresignedURLProvider = (*PresignedS3)(nil)
 )
 
 // s3API is the subset of the S3 client used by the storage adapter, enabling test mocking.
@@ -33,7 +42,10 @@ type s3API interface {
 	HeadObject(ctx context.Context, params *s3.HeadObjectInput, optFns ...func(*s3.Options)) (*s3.HeadObjectOutput, error)
 	GetObject(ctx context.Context, params *s3.GetObjectInput, optFns ...func(*s3.Options)) (*s3.GetObjectOutput, error)
 	PutObject(ctx context.Context, params *s3.PutObjectInput, optFns ...func(*s3.Options)) (*s3.PutObjectOutput, error)
-	DeleteObject(ctx context.Context, params *s3.DeleteObjectInput, optFns ...func(*s3.Options)) (*s3.DeleteObjectOutput, error)
+	CreateMultipartUpload(ctx context.Context, params *s3.CreateMultipartUploadInput, optFns ...func(*s3.Options)) (*s3.CreateMultipartUploadOutput, error)
+	UploadPart(ctx context.Context, params *s3.UploadPartInput, optFns ...func(*s3.Options)) (*s3.UploadPartOutput, error)
+	CompleteMultipartUpload(ctx context.Context, params *s3.CompleteMultipartUploadInput, optFns ...func(*s3.Options)) (*s3.CompleteMultipartUploadOutput, error)
+	AbortMultipartUpload(ctx context.Context, params *s3.AbortMultipartUploadInput, optFns ...func(*s3.Options)) (*s3.AbortMultipartUploadOutput, error)
 }
 
 // s3Presigner is the subset of the S3 presign client used by the storage adapter.
@@ -54,18 +66,34 @@ type S3Config struct {
 	ForcePathStyle  bool
 }
 
-// S3 stores objects in an S3-compatible bucket. It supports both AWS S3 and Cloudflare R2 through configurable
-// endpoint and path style options.
+// S3 stores objects in an S3-compatible bucket, such as AWS S3 or Cloudflare R2, with transfers proxied by the server.
 type S3 struct {
-	client        s3API
-	presigner     s3Presigner
-	bucket        string
-	prefix        string
-	presignedURLs bool
+	client s3API
+	bucket string
+	prefix string
 }
 
-// NewS3 creates an S3 storage adapter with the given configuration.
-func NewS3(ctx context.Context, cfg S3Config) (*S3, error) {
+// PresignedS3 is an S3 adapter that hands clients presigned URLs for direct transfers to and from the bucket.
+type PresignedS3 struct {
+	*S3
+	presigner s3Presigner
+}
+
+// NewS3 creates an S3 storage adapter, returning a *PresignedS3 when cfg.PresignedURLs is set and an *S3 otherwise.
+func NewS3(ctx context.Context, cfg S3Config) (Adapter, error) {
+	client, err := newS3Client(ctx, cfg)
+	if err != nil {
+		return nil, err
+	}
+	store := &S3{client: client, bucket: cfg.Bucket, prefix: cfg.Prefix}
+	if cfg.PresignedURLs {
+		return &PresignedS3{S3: store, presigner: s3.NewPresignClient(client)}, nil
+	}
+	return store, nil
+}
+
+// newS3Client builds an S3 client from the region, credentials, endpoint and path style in cfg.
+func newS3Client(ctx context.Context, cfg S3Config) (*s3.Client, error) {
 	var opts []func(*awsconfig.LoadOptions) error
 	opts = append(opts, awsconfig.WithRegion(cfg.Region))
 
@@ -80,39 +108,13 @@ func NewS3(ctx context.Context, cfg S3Config) (*S3, error) {
 		return nil, fmt.Errorf("loading AWS config: %w", err)
 	}
 
-	var s3Opts []func(*s3.Options)
-	if cfg.Endpoint != "" {
-		s3Opts = append(s3Opts, func(o *s3.Options) {
+	return s3.NewFromConfig(awsCfg, func(o *s3.Options) {
+		if cfg.Endpoint != "" {
 			o.BaseEndpoint = aws.String(cfg.Endpoint)
-		})
-	}
-	if cfg.ForcePathStyle {
-		s3Opts = append(s3Opts, func(o *s3.Options) {
-			o.UsePathStyle = true
-		})
-	}
-
-	client := s3.NewFromConfig(awsCfg, s3Opts...)
-	presigner := s3.NewPresignClient(client)
-
-	return &S3{
-		client:        client,
-		presigner:     presigner,
-		bucket:        cfg.Bucket,
-		prefix:        cfg.Prefix,
-		presignedURLs: cfg.PresignedURLs,
-	}, nil
-}
-
-// newS3WithClient creates an S3 adapter with injected dependencies for testing.
-func newS3WithClient(client s3API, presigner s3Presigner, bucket, prefix string, presignedURLs bool) *S3 {
-	return &S3{
-		client:        client,
-		presigner:     presigner,
-		bucket:        bucket,
-		prefix:        prefix,
-		presignedURLs: presignedURLs,
-	}
+		}
+		o.UsePathStyle = cfg.ForcePathStyle
+		o.DisableLogOutputChecksumValidationSkipped = true
+	}), nil
 }
 
 // Exists reports whether the object exists in the S3 bucket.
@@ -158,36 +160,108 @@ func (s *S3) Get(ctx context.Context, endpoint, oid string) (io.ReadCloser, int6
 	return resp.Body, size, nil
 }
 
-// Put streams reader content to S3, verifying the SHA-256 hash matches the OID. If the hash does not match, the
-// uploaded object is deleted and ErrHashMismatch is returned.
-func (s *S3) Put(ctx context.Context, endpoint, oid string, reader io.Reader) error {
+// Put uploads size bytes from reader in buffered parts, writing the object only if its SHA-256 matches the OID.
+func (s *S3) Put(ctx context.Context, endpoint, oid string, reader io.Reader, size int64) error {
 	key, err := s.objectKey(endpoint, oid)
 	if err != nil {
 		return err
 	}
 
 	hasher := sha256.New()
-	tee := io.TeeReader(reader, hasher)
+	body := io.TeeReader(reader, hasher)
+	partSize := max(s3PartSize, (size+s3MaxParts-1)/s3MaxParts)
 
+	if size > partSize {
+		return s.putMultipart(ctx, key, oid, body, hasher, size, partSize)
+	}
+
+	buf := make([]byte, size)
+	if _, err := io.ReadFull(body, buf); err != nil {
+		return fmt.Errorf("reading object %s: %w", oid, err)
+	}
+	if err := verifyOID(hasher, oid); err != nil {
+		return err
+	}
 	_, err = s.client.PutObject(ctx, &s3.PutObjectInput{
-		Bucket: aws.String(s.bucket),
-		Key:    aws.String(key),
-		Body:   tee,
+		Bucket:        aws.String(s.bucket),
+		Key:           aws.String(key),
+		Body:          bytes.NewReader(buf),
+		ContentLength: aws.Int64(size),
 	})
 	if err != nil {
 		return fmt.Errorf("writing object %s: %w", oid, err)
 	}
+	return nil
+}
 
-	computed := hex.EncodeToString(hasher.Sum(nil))
-	if !strings.EqualFold(computed, oid) {
-		// Hash mismatch: clean up the uploaded object.
-		_, _ = s.client.DeleteObject(ctx, &s3.DeleteObjectInput{
-			Bucket: aws.String(s.bucket),
-			Key:    aws.String(key),
+// putMultipart uploads body as a multipart upload, completing it only if the SHA-256 matches the OID.
+func (s *S3) putMultipart(ctx context.Context, key, oid string, body io.Reader, hasher hash.Hash, size, partSize int64) (err error) {
+	created, err := s.client.CreateMultipartUpload(ctx, &s3.CreateMultipartUploadInput{
+		Bucket:            aws.String(s.bucket),
+		Key:               aws.String(key),
+		ChecksumAlgorithm: s3types.ChecksumAlgorithmCrc32,
+	})
+	if err != nil {
+		return fmt.Errorf("starting multipart upload for %s: %w", oid, err)
+	}
+	defer func() {
+		if err != nil {
+			_, _ = s.client.AbortMultipartUpload(context.WithoutCancel(ctx), &s3.AbortMultipartUploadInput{
+				Bucket:   aws.String(s.bucket),
+				Key:      aws.String(key),
+				UploadId: created.UploadId,
+			})
+		}
+	}()
+
+	buf := make([]byte, partSize)
+	var parts []s3types.CompletedPart
+	for number := int32(1); size > 0; number++ {
+		n := min(partSize, size)
+		if _, err := io.ReadFull(body, buf[:n]); err != nil {
+			return fmt.Errorf("reading object %s: %w", oid, err)
+		}
+		out, err := s.client.UploadPart(ctx, &s3.UploadPartInput{
+			Bucket:            aws.String(s.bucket),
+			Key:               aws.String(key),
+			UploadId:          created.UploadId,
+			PartNumber:        aws.Int32(number),
+			Body:              bytes.NewReader(buf[:n]),
+			ContentLength:     aws.Int64(n),
+			ChecksumAlgorithm: s3types.ChecksumAlgorithmCrc32,
 		})
-		return fmt.Errorf("%w: expected %s, got %s", ErrHashMismatch, oid, computed)
+		if err != nil {
+			return fmt.Errorf("uploading part %d of %s: %w", number, oid, err)
+		}
+		parts = append(parts, s3types.CompletedPart{
+			ETag:          out.ETag,
+			PartNumber:    aws.Int32(number),
+			ChecksumCRC32: out.ChecksumCRC32,
+		})
+		size -= n
 	}
 
+	if err := verifyOID(hasher, oid); err != nil {
+		return err
+	}
+	_, err = s.client.CompleteMultipartUpload(ctx, &s3.CompleteMultipartUploadInput{
+		Bucket:          aws.String(s.bucket),
+		Key:             aws.String(key),
+		UploadId:        created.UploadId,
+		MultipartUpload: &s3types.CompletedMultipartUpload{Parts: parts},
+	})
+	if err != nil {
+		return fmt.Errorf("completing multipart upload for %s: %w", oid, err)
+	}
+	return nil
+}
+
+// verifyOID returns ErrHashMismatch unless the hash computed so far equals the OID.
+func verifyOID(hasher hash.Hash, oid string) error {
+	computed := hex.EncodeToString(hasher.Sum(nil))
+	if !strings.EqualFold(computed, oid) {
+		return fmt.Errorf("%w: expected %s, got %s", ErrHashMismatch, oid, computed)
+	}
 	return nil
 }
 
@@ -220,10 +294,7 @@ func (s *S3) AvailableSpace(_ context.Context) (uint64, error) {
 }
 
 // PresignGet returns a presigned GET URL for direct client downloads.
-func (s *S3) PresignGet(ctx context.Context, endpoint, oid string, expiry time.Duration) (string, error) {
-	if !s.presignedURLs {
-		return "", fmt.Errorf("presigned URLs are disabled")
-	}
+func (s *PresignedS3) PresignGet(ctx context.Context, endpoint, oid string, expiry time.Duration) (string, error) {
 	key, err := s.objectKey(endpoint, oid)
 	if err != nil {
 		return "", err
@@ -240,10 +311,7 @@ func (s *S3) PresignGet(ctx context.Context, endpoint, oid string, expiry time.D
 }
 
 // PresignPut returns a presigned PUT URL for direct client uploads.
-func (s *S3) PresignPut(ctx context.Context, endpoint, oid string, expiry time.Duration) (string, error) {
-	if !s.presignedURLs {
-		return "", fmt.Errorf("presigned URLs are disabled")
-	}
+func (s *PresignedS3) PresignPut(ctx context.Context, endpoint, oid string, expiry time.Duration) (string, error) {
 	key, err := s.objectKey(endpoint, oid)
 	if err != nil {
 		return "", err

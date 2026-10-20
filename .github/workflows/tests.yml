@@ -46,3 +46,32 @@ jobs:
           name: coverage
           path: coverage.out
           retention-days: 14
+
+  s3-integration:
+    name: S3 Integration
+    runs-on: ubuntu-latest
+    env:
+      ANCHOR_LFS_TEST_S3_ENDPOINT: http://127.0.0.1:9000
+      ANCHOR_LFS_TEST_S3_ACCESS_KEY_ID: anchortest
+      ANCHOR_LFS_TEST_S3_SECRET_ACCESS_KEY: anchortestsecret
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      - name: Start RustFS
+        run: |
+          docker run -d --name rustfs -p 127.0.0.1:9000:9000 \
+            -e RUSTFS_ACCESS_KEY="$ANCHOR_LFS_TEST_S3_ACCESS_KEY_ID" \
+            -e RUSTFS_SECRET_KEY="$ANCHOR_LFS_TEST_S3_SECRET_ACCESS_KEY" \
+            rustfs/rustfs:1.0.3@sha256:9ca9559533b537d10482fe923288b676ad08f92a7069d9a17327fbae3cab688b
+          timeout 60 sh -c 'until curl -sf "$ANCHOR_LFS_TEST_S3_ENDPOINT/health" > /dev/null; do sleep 1; done'
+
+      - name: Test
+        run: go test -race -v -run TestS3Integration ./storage/
+
+      - name: RustFS logs
+        if: failure()
+        run: docker logs rustfs

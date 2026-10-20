@@ -27,7 +27,7 @@ func TestPutAndGet(t *testing.T) {
 
 	ctx := t.Context()
 
-	if err := store.Put(ctx, "test", oid, bytes.NewReader(data)); err != nil {
+	if err := store.Put(ctx, "test", oid, bytes.NewReader(data), int64(len(data))); err != nil {
 		t.Fatalf("Put: %v", err)
 	}
 
@@ -73,7 +73,7 @@ func TestPutHashMismatch(t *testing.T) {
 
 	ctx := t.Context()
 
-	err := store.Put(ctx, "test", badOID, bytes.NewReader(data))
+	err := store.Put(ctx, "test", badOID, bytes.NewReader(data), int64(len(data)))
 	if err == nil {
 		t.Fatal("expected error for hash mismatch")
 	}
@@ -113,10 +113,10 @@ func TestPutIdempotent(t *testing.T) {
 
 	ctx := t.Context()
 
-	if err := store.Put(ctx, "test", oid, bytes.NewReader(data)); err != nil {
+	if err := store.Put(ctx, "test", oid, bytes.NewReader(data), int64(len(data))); err != nil {
 		t.Fatalf("first Put: %v", err)
 	}
-	if err := store.Put(ctx, "test", oid, bytes.NewReader(data)); err != nil {
+	if err := store.Put(ctx, "test", oid, bytes.NewReader(data), int64(len(data))); err != nil {
 		t.Fatalf("second Put: %v", err)
 	}
 }
@@ -177,7 +177,7 @@ func TestPutCleansUpOnFailure(t *testing.T) {
 	store := testStore(t)
 	badOID := "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
 
-	_ = store.Put(t.Context(), "test", badOID, bytes.NewReader([]byte("data")))
+	_ = store.Put(t.Context(), "test", badOID, bytes.NewReader([]byte("data")), 4)
 
 	// Walk the entire storage tree to check for orphaned temp files.
 	err := filepath.WalkDir(store.basePath, func(path string, d fs.DirEntry, err error) error {
@@ -220,7 +220,7 @@ func TestRejectsInvalidOID(t *testing.T) {
 		if _, err := store.Size(ctx, "test", oid); !errors.Is(err, ErrInvalidOID) {
 			t.Errorf("Size(%q) error = %v, want ErrInvalidOID", oid, err)
 		}
-		if err := store.Put(ctx, "test", oid, bytes.NewReader([]byte("data"))); !errors.Is(err, ErrInvalidOID) {
+		if err := store.Put(ctx, "test", oid, bytes.NewReader([]byte("data")), 4); !errors.Is(err, ErrInvalidOID) {
 			t.Errorf("Put(%q) error = %v, want ErrInvalidOID", oid, err)
 		}
 	}
@@ -240,7 +240,7 @@ func TestUppercaseOIDResolvesToSameObject(t *testing.T) {
 	data := []byte("hello world")
 	oid := testutil.SHA256Hex(data)
 
-	if err := store.Put(ctx, "test", strings.ToUpper(oid), bytes.NewReader(data)); err != nil {
+	if err := store.Put(ctx, "test", strings.ToUpper(oid), bytes.NewReader(data), int64(len(data))); err != nil {
 		t.Fatalf("Put: %v", err)
 	}
 	exists, err := store.Exists(ctx, "test", oid)

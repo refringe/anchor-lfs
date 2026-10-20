@@ -78,7 +78,7 @@ func (l *Local) Get(ctx context.Context, endpoint, oid string) (io.ReadCloser, i
 // the OID. The context is not checked during I/O because the reader (typically
 // an http.Request.Body) will return an error when the client disconnects,
 // which naturally terminates the io.Copy.
-func (l *Local) Put(ctx context.Context, endpoint, oid string, reader io.Reader) error {
+func (l *Local) Put(ctx context.Context, endpoint, oid string, reader io.Reader, _ int64) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}

@@ -324,7 +324,7 @@ func TestVerifyHandler(t *testing.T) {
 
 	data := []byte("verify me")
 	oid := testutil.SHA256Hex(data)
-	if err := store.Put(context.Background(), h.endpoint.Path, oid, bytes.NewReader(data)); err != nil {
+	if err := store.Put(context.Background(), h.endpoint.Path, oid, bytes.NewReader(data), int64(len(data))); err != nil {
 		t.Fatalf("Put: %v", err)
 	}
 
@@ -1098,7 +1098,7 @@ func TestBatchMixedSuccessAndFailure(t *testing.T) {
 	// Upload one object so it exists on disk.
 	existingData := []byte("existing object data")
 	existingOID := testutil.SHA256Hex(existingData)
-	if err := store.Put(context.Background(), h.endpoint.Path, existingOID, bytes.NewReader(existingData)); err != nil {
+	if err := store.Put(context.Background(), h.endpoint.Path, existingOID, bytes.NewReader(existingData), int64(len(existingData))); err != nil {
 		t.Fatalf("Put: %v", err)
 	}
 
@@ -1164,7 +1164,7 @@ func TestBatchUploadMixedNewAndExisting(t *testing.T) {
 	// Upload one object so it exists.
 	existingData := []byte("already here")
 	existingOID := testutil.SHA256Hex(existingData)
-	if err := store.Put(context.Background(), h.endpoint.Path, existingOID, bytes.NewReader(existingData)); err != nil {
+	if err := store.Put(context.Background(), h.endpoint.Path, existingOID, bytes.NewReader(existingData), int64(len(existingData))); err != nil {
 		t.Fatalf("Put: %v", err)
 	}
 
