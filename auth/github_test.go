@@ -3,9 +3,11 @@ package auth
 import (
 	"context"
 	"encoding/json/v2"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -331,5 +333,103 @@ func TestEmptyPasswordNotCached(t *testing.T) {
 	defer g.mu.Unlock()
 	if len(g.cache) != 0 {
 		t.Errorf("expected empty cache, got %d entries", len(g.cache))
+	}
+}
+
+func TestGitHubAPIErrors(t *testing.T) {
+	reset := strconv.FormatInt(time.Now().Add(2*time.Minute).Unix(), 10)
+	distantReset := strconv.FormatInt(time.Now().Add(48*time.Hour).Unix(), 10)
+	tests := []struct {
+		name            string
+		status          int
+		header          map[string]string
+		body            map[string]string
+		want            Result
+		wantRetryAfter  time.Duration
+		wantUnavailable bool
+		wantCached      bool
+	}{
+		{name: "bad credentials", status: http.StatusUnauthorized, body: map[string]string{"message": "Bad credentials"}},
+		{name: "repository not visible", status: http.StatusNotFound, body: map[string]string{"message": "Not Found"}, want: Result{Authenticated: true}, wantCached: true},
+		{
+			name:       "SSO not authorised",
+			status:     http.StatusForbidden,
+			header:     map[string]string{"X-GitHub-SSO": "required; url=https://github.com/orgs/org/sso"},
+			body:       map[string]string{"message": "Resource protected by SAML enforcement."},
+			want:       Result{Authenticated: true},
+			wantCached: true,
+		},
+		{
+			name:           "primary rate limit",
+			status:         http.StatusForbidden,
+			header:         map[string]string{"X-RateLimit-Remaining": "0", "X-RateLimit-Reset": reset},
+			body:           map[string]string{"message": "API rate limit exceeded"},
+			wantRetryAfter: 2 * time.Minute,
+		},
+		{
+			name:           "distant reset capped",
+			status:         http.StatusForbidden,
+			header:         map[string]string{"X-RateLimit-Remaining": "0", "X-RateLimit-Reset": distantReset},
+			body:           map[string]string{"message": "API rate limit exceeded"},
+			wantRetryAfter: maxRetryAfter,
+		},
+		{
+			name:           "secondary rate limit",
+			status:         http.StatusForbidden,
+			header:         map[string]string{"Retry-After": "30"},
+			body:           map[string]string{"message": "You have exceeded a secondary rate limit.", "documentation_url": "https://docs.github.com/rest/overview/rate-limits-for-the-rest-api#about-secondary-rate-limits"},
+			wantRetryAfter: 30 * time.Second,
+		},
+		{name: "too many requests", status: http.StatusTooManyRequests, header: map[string]string{"Retry-After": "45"}, wantRetryAfter: 45 * time.Second},
+		{name: "too many requests without hint", status: http.StatusTooManyRequests, wantRetryAfter: defaultRetryAfter},
+		{name: "server error", status: http.StatusInternalServerError, wantUnavailable: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var calls atomic.Int64
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				calls.Add(1)
+				for name, value := range tt.header {
+					w.Header().Set(name, value)
+				}
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(tt.status)
+				_ = json.MarshalWrite(w, tt.body)
+			}))
+			defer srv.Close()
+			g := newGitHubAuth(srv.URL, time.Minute)
+			defer func() { _ = g.Close() }()
+
+			for range 2 {
+				result, err := g.Authenticate(context.Background(), testEndpoint(), "", "token", OperationDownload)
+				if result != tt.want {
+					t.Errorf("result = %+v, want %+v", result, tt.want)
+				}
+				rateErr, isRateLimited := errors.AsType[*RateLimitedError](err)
+				switch {
+				case tt.wantRetryAfter > 0:
+					if !isRateLimited {
+						t.Fatalf("error = %v, want RateLimitedError", err)
+					}
+					if diff := rateErr.RetryAfter - tt.wantRetryAfter; diff > time.Second || diff < -5*time.Second {
+						t.Errorf("RetryAfter = %v, want about %v", rateErr.RetryAfter, tt.wantRetryAfter)
+					}
+				case tt.wantUnavailable:
+					if !errors.Is(err, ErrUnavailable) {
+						t.Fatalf("error = %v, want ErrUnavailable", err)
+					}
+				case err != nil:
+					t.Fatalf("Authenticate: %v", err)
+				}
+			}
+
+			wantCalls := int64(2)
+			if tt.wantCached {
+				wantCalls = 1
+			}
+			if got := calls.Load(); got != wantCalls {
+				t.Errorf("GitHub API calls = %d, want %d", got, wantCalls)
+			}
+		})
 	}
 }

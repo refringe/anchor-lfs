@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"math"
 	"mime"
 	"net"
 	"net/http"
@@ -553,6 +554,17 @@ func (h *Handler) requireAuth(w http.ResponseWriter, r *http.Request, op auth.Op
 // so callers can access the authenticated username.
 func (h *Handler) requireAuthResult(w http.ResponseWriter, r *http.Request, op auth.Operation) (auth.Result, bool) {
 	result, err := h.authenticate(r, op)
+	if rateErr, ok := errors.AsType[*auth.RateLimitedError](err); ok {
+		log.Warn().Err(err).Str("endpoint", h.endpoint.Name).Msg("authentication rate limited")
+		w.Header().Set("Retry-After", strconv.Itoa(max(1, int(math.Ceil(rateErr.RetryAfter.Seconds())))))
+		writeError(w, r, http.StatusTooManyRequests, "authentication service rate limit exceeded")
+		return auth.Result{}, false
+	}
+	if errors.Is(err, auth.ErrUnavailable) {
+		log.Warn().Err(err).Str("endpoint", h.endpoint.Name).Msg("authentication service unavailable")
+		writeError(w, r, http.StatusBadGateway, "authentication service unavailable")
+		return auth.Result{}, false
+	}
 	if err != nil {
 		log.Error().Err(err).Str("endpoint", h.endpoint.Name).Msg("authentication error")
 		writeError(w, r, http.StatusInternalServerError, msgInternalError)

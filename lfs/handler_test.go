@@ -960,6 +960,48 @@ func (s *spaceAwareStore) AvailableSpace(_ context.Context) (uint64, error) {
 	return s.avail, s.availErr
 }
 
+// failingAuth is an authenticator that always returns err.
+type failingAuth struct {
+	err error
+}
+
+func (a *failingAuth) Authenticate(_ context.Context, _ *config.Endpoint, _, _ string, _ auth.Operation) (auth.Result, error) {
+	return auth.Result{}, a.err
+}
+
+func TestBatchAuthenticationErrors(t *testing.T) {
+	tests := []struct {
+		name           string
+		err            error
+		wantStatus     int
+		wantRetryAfter string
+	}{
+		{name: "rate limited", err: &auth.RateLimitedError{RetryAfter: 1500 * time.Millisecond}, wantStatus: http.StatusTooManyRequests, wantRetryAfter: "2"},
+		{name: "provider unavailable", err: fmt.Errorf("%w: connection refused", auth.ErrUnavailable), wantStatus: http.StatusBadGateway},
+		{name: "unexpected error", err: errors.New("boom"), wantStatus: http.StatusInternalServerError},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h, _, _ := testHandler(t)
+			h.auth = &failingAuth{err: tt.err}
+
+			b, _ := json.Marshal(BatchRequest{Operation: "download", Objects: []Object{{OID: strings.Repeat("a", 64), Size: 1}}})
+			req := httptest.NewRequestWithContext(context.Background(), "POST", "/org/repo/objects/batch", bytes.NewReader(b))
+			req.Header.Set("Accept", lfsMediaType)
+			req.Header.Set("Content-Type", lfsMediaType)
+			w := httptest.NewRecorder()
+			h.BatchHandler(w, req)
+
+			if w.Code != tt.wantStatus {
+				t.Fatalf("status = %d, want %d: %s", w.Code, tt.wantStatus, w.Body.String())
+			}
+			if got := w.Header().Get("Retry-After"); got != tt.wantRetryAfter {
+				t.Errorf("Retry-After = %q, want %q", got, tt.wantRetryAfter)
+			}
+		})
+	}
+}
+
 // presigningStore wraps a real storage adapter with presigned URLs that refuse objects larger than maxSize.
 type presigningStore struct {
 	storage.Adapter

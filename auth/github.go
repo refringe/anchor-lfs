@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"cmp"
 	"context"
 	"crypto/hmac"
 	"crypto/rand"
@@ -10,6 +11,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"strconv"
 	"sync"
 	"time"
 
@@ -92,10 +94,11 @@ func (g *GitHub) Authenticate(ctx context.Context, endpoint *config.Endpoint, _ 
 
 	repo, _, err := client.Repositories.Get(ctx, endpoint.GitHubOwner, endpoint.GitHubRepo)
 	if err != nil {
-		if ghErr, ok := errors.AsType[*github.ErrorResponse](err); ok && ghErr.Response != nil && ghErr.Response.StatusCode == http.StatusUnauthorized {
-			return Result{Authenticated: false}, nil // NOT cached.
+		result, err := classifyGitHubError(err)
+		if err == nil && result.Authenticated {
+			g.cacheStoreIfEnabled(key, result) // Cached: the token is valid but cannot see the repository.
 		}
-		return Result{}, fmt.Errorf("github API: %w", err) // NOT cached.
+		return result, err
 	}
 
 	perms := repo.GetPermissions()
@@ -109,7 +112,7 @@ func (g *GitHub) Authenticate(ctx context.Context, endpoint *config.Endpoint, _ 
 	// Fetch the authenticated user's login for lock ownership.
 	user, _, err := client.Users.Get(ctx, "")
 	if err != nil {
-		return Result{}, fmt.Errorf("github API (user): %w", err) // NOT cached.
+		return classifyGitHubError(err) // NOT cached.
 	}
 	username := user.GetLogin()
 
@@ -125,6 +128,58 @@ func (g *GitHub) Authenticate(ctx context.Context, endpoint *config.Endpoint, _ 
 
 	g.cacheStoreIfEnabled(key, result)
 	return result, nil
+}
+
+// defaultRetryAfter is the wait reported when GitHub rate limits a request without saying when to retry, and
+// maxRetryAfter caps the wait GitHub asks for.
+const (
+	defaultRetryAfter = time.Minute
+	maxRetryAfter     = time.Hour
+)
+
+// classifyGitHubError maps a GitHub API error to a definitive Result, a *RateLimitedError, or an ErrUnavailable error.
+func classifyGitHubError(err error) (Result, error) {
+	if rateErr, ok := errors.AsType[*github.RateLimitError](err); ok {
+		return Result{}, rateLimited(untilReset(rateErr.Rate.Reset.Time))
+	}
+	if abuseErr, ok := errors.AsType[*github.AbuseRateLimitError](err); ok {
+		return Result{}, rateLimited(cmp.Or(abuseErr.GetRetryAfter(), defaultRetryAfter))
+	}
+	if respErr, ok := errors.AsType[*github.ErrorResponse](err); ok && respErr.Response != nil {
+		switch respErr.Response.StatusCode {
+		case http.StatusUnauthorized:
+			return Result{}, nil
+		case http.StatusForbidden, http.StatusNotFound:
+			return Result{Authenticated: true}, nil
+		case http.StatusTooManyRequests:
+			return Result{}, rateLimited(retryAfter(respErr.Response.Header))
+		}
+	}
+	return Result{}, fmt.Errorf("%w: github API: %w", ErrUnavailable, err)
+}
+
+// rateLimited returns a RateLimitedError asking the caller to wait, at most maxRetryAfter.
+func rateLimited(wait time.Duration) *RateLimitedError {
+	return &RateLimitedError{RetryAfter: min(wait, maxRetryAfter)}
+}
+
+// retryAfter reads how long to wait from the Retry-After or X-RateLimit-Reset header of a rate-limited response.
+func retryAfter(header http.Header) time.Duration {
+	if seconds, err := strconv.Atoi(header.Get("Retry-After")); err == nil && seconds > 0 {
+		return time.Duration(seconds) * time.Second
+	}
+	if reset, err := strconv.ParseInt(header.Get("X-RateLimit-Reset"), 10, 64); err == nil {
+		return untilReset(time.Unix(reset, 0))
+	}
+	return defaultRetryAfter
+}
+
+// untilReset returns the wait until a rate limit resets, at least one second, or defaultRetryAfter if reset is unknown.
+func untilReset(reset time.Time) time.Duration {
+	if reset.IsZero() {
+		return defaultRetryAfter
+	}
+	return max(time.Until(reset), time.Second)
 }
 
 // Close shuts down the background cache sweeper. It is safe to call multiple
