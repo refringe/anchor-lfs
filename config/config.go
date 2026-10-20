@@ -4,9 +4,11 @@ package config
 import (
 	"encoding/hex"
 	"fmt"
+	"net/netip"
 	"net/url"
 	"os"
 	"path"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -17,6 +19,9 @@ import (
 
 // DefaultConfigPath is the file path used when no override is provided.
 const DefaultConfigPath = "config.toml"
+
+// DefaultTrustedProxies are the loopback and private ranges trusted to send X-Forwarded-* headers by default.
+var DefaultTrustedProxies = []string{"127.0.0.0/8", "::1/128", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "fc00::/7"}
 
 // authGitHub is the normalised name for GitHub-based authentication.
 const authGitHub = "github"
@@ -70,6 +75,9 @@ type Options struct {
 	AdditionalLogging bool   `toml:"additional_logging"`
 	BaseURL           string `toml:"base_url"`
 	MaxUploadSize     int64  `toml:"max_upload_size"`
+
+	// Peers allowed to set X-Forwarded-For, X-Forwarded-Host and X-Forwarded-Proto.
+	TrustedProxies []string `toml:"trusted_proxies"`
 
 	// Rate limiting.
 	RateLimitTokens   uint64        `toml:"rate_limit_tokens"`
@@ -174,6 +182,9 @@ func (c *Config) applyDefaults() {
 	if c.Options.MaxUploadSize <= 0 {
 		c.Options.MaxUploadSize = 5 << 30 // 5 GiB
 	}
+	if c.Options.TrustedProxies == nil {
+		c.Options.TrustedProxies = slices.Clone(DefaultTrustedProxies)
+	}
 	if c.Options.RateLimitTokens == 0 {
 		c.Options.RateLimitTokens = 600
 	}
@@ -206,6 +217,14 @@ func (c *Config) applyEnvOverrides() {
 	}
 	if v := os.Getenv("ANCHOR_LFS_SIGNING_KEY"); v != "" {
 		c.Options.SigningKey = v
+	}
+	if v, ok := os.LookupEnv("ANCHOR_LFS_TRUSTED_PROXIES"); ok {
+		c.Options.TrustedProxies = []string{}
+		for entry := range strings.SplitSeq(v, ",") {
+			if entry = strings.TrimSpace(entry); entry != "" {
+				c.Options.TrustedProxies = append(c.Options.TrustedProxies, entry)
+			}
+		}
 	}
 	if v := os.Getenv("ANCHOR_LFS_MAX_UPLOAD_SIZE"); v != "" {
 		if n, err := strconv.ParseInt(v, 10, 64); err == nil && n > 0 {
@@ -332,6 +351,14 @@ func (c *Config) validate() error {
 		u, err := url.Parse(c.Options.BaseURL)
 		if err != nil || u.Scheme == "" || u.Host == "" {
 			return fmt.Errorf("base_url %q is not a valid URL", c.Options.BaseURL)
+		}
+	}
+	for _, proxy := range c.Options.TrustedProxies {
+		if _, err := netip.ParsePrefix(proxy); err == nil {
+			continue
+		}
+		if _, err := netip.ParseAddr(proxy); err != nil {
+			return fmt.Errorf("trusted_proxies entry %q is not an IP address or CIDR range", proxy)
 		}
 	}
 	if len(c.Endpoints) == 0 {

@@ -605,14 +605,7 @@ func isValidLockPath(path string) bool {
 	return err == nil
 }
 
-// requestBaseURL returns the external base URL for action hrefs. If a base URL
-// is configured, it is returned directly — this is the recommended approach for
-// production deployments as it eliminates trust in forwarded headers.
-//
-// When no base URL is configured, the function falls back to X-Forwarded-Proto
-// and X-Forwarded-Host headers for reverse proxy support. These headers should
-// only be set by a trusted proxy — do not expose the server directly to the
-// internet without a proxy that controls these headers.
+// requestBaseURL returns base_url if set, else one built from the request and any X-Forwarded-Proto and -Host it has.
 func (h *Handler) requestBaseURL(r *http.Request) string {
 	if h.baseURL != "" {
 		return h.baseURL

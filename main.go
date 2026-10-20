@@ -88,12 +88,20 @@ func main() {
 	lockStore := lfs.NewFileLockStore(cfg.Options.DataDirectory)
 
 	rateLimitStore, err := memorystore.New(&memorystore.Config{
-		Tokens:   cfg.Options.RateLimitTokens,
-		Interval: cfg.Options.RateLimitInterval,
+		Tokens:        cfg.Options.RateLimitTokens,
+		Interval:      cfg.Options.RateLimitInterval,
+		SweepInterval: cfg.Options.RateLimitInterval,
+		SweepMinTTL:   cfg.Options.RateLimitInterval,
 	})
 	if err != nil {
 		log.Fatal().Err(err).Msg("creating rate limiter")
 	}
+
+	proxyTrust, err := middleware.NewProxyTrust(cfg.Options.TrustedProxies)
+	if err != nil {
+		log.Fatal().Err(err).Msg("creating proxy trust")
+	}
+	log.Info().Strs("trusted_proxies", cfg.Options.TrustedProxies).Msg("trusting X-Forwarded-* headers from these peers")
 
 	// Shared HTTP client for GitHub API calls (connection pooling).
 	githubHTTPClient := &http.Client{Timeout: 10 * time.Second}
@@ -101,7 +109,7 @@ func main() {
 	mux := http.NewServeMux()
 
 	if cfg.Options.BaseURL == "" {
-		log.Warn().Msg("base_url is not set; action URLs will be derived from request headers — ensure a trusted reverse proxy sets X-Forwarded-Proto and X-Forwarded-Host, or set base_url in config")
+		log.Warn().Msg("base_url is not set; action URLs will be derived from the Host header, or X-Forwarded-Host and X-Forwarded-Proto from trusted_proxies peers; set base_url in config")
 	}
 
 	signingKey := cfg.Options.SigningKeyBytes
@@ -187,6 +195,7 @@ func main() {
 	if cfg.Options.AdditionalLogging {
 		handler = middleware.Logging(handler)
 	}
+	handler = proxyTrust.Handler(handler)
 
 	server := &http.Server{
 		Addr:    cfg.Options.ListenAddress,

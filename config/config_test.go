@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -79,6 +80,57 @@ authentication = "none"
 	}
 	if cfg.Options.RateLimitInterval != time.Minute {
 		t.Errorf("default RateLimitInterval = %v, want %v", cfg.Options.RateLimitInterval, time.Minute)
+	}
+}
+
+func TestLoadTrustedProxies(t *testing.T) {
+	tests := []struct {
+		name    string
+		options string
+		env     string
+		setEnv  bool
+		want    []string
+		wantErr bool
+	}{
+		{name: "default", want: DefaultTrustedProxies},
+		{name: "explicit list", options: `trusted_proxies = ["192.168.1.2", "10.0.0.0/8"]`, want: []string{"192.168.1.2", "10.0.0.0/8"}},
+		{name: "explicit empty", options: `trusted_proxies = []`, want: []string{}},
+		{name: "env list", env: "192.168.1.2, 10.0.0.0/8", setEnv: true, want: []string{"192.168.1.2", "10.0.0.0/8"}},
+		{name: "env empty", options: `trusted_proxies = ["10.0.0.0/8"]`, setEnv: true, want: []string{}},
+		{name: "hostname rejected", options: `trusted_proxies = ["proxy.example.com"]`, wantErr: true},
+		{name: "bad range rejected", options: `trusted_proxies = ["10.0.0.0/33"]`, wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.setEnv {
+				t.Setenv("ANCHOR_LFS_TRUSTED_PROXIES", tt.env)
+			}
+			path := writeConfig(t, `
+[options]
+`+tt.options+`
+
+[[endpoints]]
+name = "Test"
+url = "https://github.com/org/repo"
+endpoint = "/org/repo"
+visibility = "public"
+authentication = "none"
+`)
+
+			cfg, err := Load(path)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("expected error")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			if cfg.Options.TrustedProxies == nil || !slices.Equal(cfg.Options.TrustedProxies, tt.want) {
+				t.Errorf("TrustedProxies = %#v, want %#v", cfg.Options.TrustedProxies, tt.want)
+			}
+		})
 	}
 }
 

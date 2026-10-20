@@ -88,25 +88,3 @@ func TestRateLimitBlocks(t *testing.T) {
 		t.Fatalf("expected rate limit message, got %q", body["message"])
 	}
 }
-
-func TestClientIPFallback(t *testing.T) {
-	req := httptest.NewRequestWithContext(context.Background(), "GET", "/", nil)
-	req.RemoteAddr = "10.0.0.1:1234"
-
-	ip := ClientIP(req)
-	if ip == "" {
-		t.Fatal("expected non-empty IP")
-	}
-}
-
-func TestClientIPWithForwardedFor(t *testing.T) {
-	req := httptest.NewRequestWithContext(context.Background(), "GET", "/", nil)
-	req.RemoteAddr = "10.0.0.1:1234"
-	req.Header.Set("X-Forwarded-For", "8.8.8.8")
-
-	ip := ClientIP(req)
-	// RightmostNonPrivate picks the rightmost non-private IP from the header.
-	if ip != "8.8.8.8" {
-		t.Fatalf("expected 8.8.8.8, got %q", ip)
-	}
-}

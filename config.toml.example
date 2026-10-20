@@ -6,6 +6,10 @@ data_directory = "./data"
 additional_logging = false
 #base_url = "https://lfs.example.com"
 
+# Peers allowed to set X-Forwarded-For, -Host and -Proto (default: loopback and private ranges). These headers are
+# removed from requests sent by any other peer. Set to [] to trust no one.
+#trusted_proxies = ["127.0.0.0/8", "::1/128", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "fc00::/7"]
+
 # Maximum upload size in bytes (default: 5 GiB = 5368709120).
 #max_upload_size = 5368709120
 

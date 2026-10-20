@@ -1,4 +1,4 @@
-// Package middleware provides HTTP middleware for per-IP rate limiting and structured request logging.
+// Package middleware provides HTTP middleware for proxy-aware client IPs, per-IP rate limiting and request logging.
 package middleware
 
 import (
@@ -9,18 +9,8 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/realclientip/realclientip-go"
 	"github.com/rs/zerolog/log"
 	"github.com/sethvargo/go-limiter"
-)
-
-// ipStrategy extracts the real client IP using proxy-aware header parsing.
-// RightmostNonPrivate handles the common case where the server sits behind
-// reverse proxies with private IPs. Falls back to RemoteAddr for direct
-// connections or when headers are absent.
-var ipStrategy = realclientip.NewChainStrategy(
-	realclientip.Must(realclientip.NewRightmostNonPrivateStrategy("X-Forwarded-For")),
-	realclientip.RemoteAddrStrategy{},
 )
 
 // maxResetNanos caps the rate limiter reset timestamp to prevent overflow
@@ -32,15 +22,6 @@ func GenerateRequestID() string {
 	var b [8]byte
 	_, _ = rand.Read(b[:])
 	return hex.EncodeToString(b[:])
-}
-
-// ClientIP extracts the client IP address from the request.
-func ClientIP(r *http.Request) string {
-	ip := ipStrategy.ClientIP(r.Header, r.RemoteAddr)
-	if ip == "" {
-		return r.RemoteAddr
-	}
-	return ip
 }
 
 // RateLimit returns middleware that enforces per-IP rate limiting using the

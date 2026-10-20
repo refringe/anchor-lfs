@@ -96,6 +96,8 @@ The job display names above are the required status check contexts in the reposi
 │   ├── filelock_unix.go    # Unix advisory file lock (syscall.Flock)
 │   └── filelock_windows.go # Windows file lock (LockFileEx)
 ├── middleware/
+│   ├── proxy.go            # Trusted-proxy handling: strips untrusted X-Forwarded-* headers, resolves client IPs
+│   ├── proxy_test.go
 │   ├── ratelimit.go        # Per-IP rate limiting middleware
 │   ├── ratelimit_test.go
 │   ├── logging.go          # Structured request logging middleware
