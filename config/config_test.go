@@ -83,6 +83,39 @@ authentication = "none"
 	}
 }
 
+func TestLoadVisibilityAndAuthentication(t *testing.T) {
+	tests := []struct {
+		visibility     string
+		authentication string
+		wantErr        bool
+	}{
+		{"public", "none", false},
+		{"public", "github", false},
+		{"private", "github", false},
+		{"private", "none", true},
+		{"Private", "None", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.visibility+"+"+tt.authentication, func(t *testing.T) {
+			path := writeConfig(t, `
+[[endpoints]]
+name = "Test"
+url = "https://github.com/org/repo"
+endpoint = "/org/repo"
+visibility = "`+tt.visibility+`"
+authentication = "`+tt.authentication+`"
+`)
+			_, err := Load(path)
+			if gotErr := err != nil; gotErr != tt.wantErr {
+				t.Fatalf("Load error = %v, want error %t", err, tt.wantErr)
+			}
+			if tt.wantErr && !strings.Contains(err.Error(), "requires authentication") {
+				t.Errorf("error %q does not explain the required authentication", err)
+			}
+		})
+	}
+}
+
 func TestLoadTrustedProxies(t *testing.T) {
 	tests := []struct {
 		name    string

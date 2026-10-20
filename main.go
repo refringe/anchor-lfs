@@ -164,6 +164,9 @@ func main() {
 
 		prefix := ep.Path
 		registerRoutes(mux, prefix, handler, rateLimitStore)
+		if ep.AuthMethod() == "none" {
+			log.Warn().Str("name", ep.Name).Str("path", prefix).Msg("endpoint has no authentication; anyone can read, write and release any lock")
+		}
 
 		log.Info().
 			Str("name", ep.Name).

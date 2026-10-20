@@ -57,7 +57,8 @@ authentication = "github"
 #authentication = "github"
 #github_api_url = "https://github.example.com/api/v3/"
 
-# Local/testing: no authentication required
+# Local/testing: no authentication required. Anyone can read, write and release any lock, so "none" is only
+# accepted with visibility = "public".
 #[[endpoints]]
 #name = "Local Dev"
 #url = "https://github.com/dev/test-repo"

@@ -409,6 +409,9 @@ func (c *Config) validate() error {
 		if vis != "public" && vis != "private" {
 			return fmt.Errorf("endpoint %q: unknown visibility %q", ep.Name, ep.Visibility)
 		}
+		if vis == "private" && auth == "none" {
+			return fmt.Errorf("endpoint %q: visibility \"private\" requires authentication \"github\"; \"none\" lets anyone read and write", ep.Name)
+		}
 	}
 	return nil
 }
