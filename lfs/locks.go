@@ -59,16 +59,7 @@ const (
 	maxLockLimit     = 1000
 )
 
-// FileLockStore persists locks as JSON files on the local filesystem.
-// An in-memory cache avoids repeated disk reads; it is validated against
-// the on-disk file's modification time and size on every access, so
-// external modifications (manual edits, restores) are detected automatically.
-//
-// Write operations (Create, Unlock) load and rewrite the entire lock list,
-// making this implementation O(n) per mutation. This is well-suited for
-// typical LFS deployments with moderate lock counts (hundreds to low
-// thousands per endpoint). Deployments expecting very high lock volumes
-// should consider a database-backed LockStore implementation.
+// FileLockStore persists locks as one JSON file per endpoint, with writes serialised across goroutines and processes.
 type FileLockStore struct {
 	basePath string
 	mutexes  sync.Map // map[string]*sync.RWMutex
@@ -79,9 +70,8 @@ type FileLockStore struct {
 // when the cache was populated. A stat() comparison on read detects
 // external modifications without re-reading the file contents.
 type cachedLocks struct {
-	locks   []Lock
-	modTime time.Time
-	size    int64
+	locks []Lock
+	info  os.FileInfo
 }
 
 // NewFileLockStore creates a FileLockStore rooted at basePath.
@@ -100,47 +90,63 @@ func (s *FileLockStore) lockFilePath(endpoint string) string {
 	return filepath.Join(s.basePath, "locks", sanitise.Endpoint(endpoint), "locks.json")
 }
 
-// loadLocks returns locks for the endpoint. The in-memory cache is
-// validated against the on-disk file's modification time and size; if
-// either differs (or the file was created/deleted externally) the cache
-// is refreshed. Callers must hold at least an RLock on the endpoint mutex.
+// lockEndpoint takes the endpoint's write mutex and its locks.json.lock file lock, returning a function releasing both.
+func (s *FileLockStore) lockEndpoint(endpoint string) (func(), error) {
+	mu := s.endpointMutex(endpoint)
+	mu.Lock()
+
+	path := s.lockFilePath(endpoint) + ".lock"
+	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+		mu.Unlock()
+		return nil, fmt.Errorf("creating lock directory: %w", err)
+	}
+	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o600) //nolint:gosec // path is built from the sanitised endpoint
+	if err != nil {
+		mu.Unlock()
+		return nil, fmt.Errorf("opening lock file: %w", err)
+	}
+	if err := lockFile(f); err != nil {
+		_ = f.Close()
+		mu.Unlock()
+		return nil, fmt.Errorf("acquiring lock file: %w", err)
+	}
+	return func() {
+		_ = unlockFile(f)
+		_ = f.Close()
+		mu.Unlock()
+	}, nil
+}
+
+// loadLocks returns cached locks while the on-disk file is unchanged; callers must hold the endpoint mutex.
 func (s *FileLockStore) loadLocks(endpoint string) ([]Lock, error) {
+	if cached, ok := s.cache.Load(sanitise.Endpoint(endpoint)); ok {
+		c := cached.(cachedLocks) //nolint:forcetypeassert // type is guaranteed by cache store
+		info, err := os.Stat(s.lockFilePath(endpoint))
+		if err == nil && os.SameFile(c.info, info) && c.info.ModTime().Equal(info.ModTime()) && c.info.Size() == info.Size() {
+			return slices.Clone(c.locks), nil
+		}
+	}
+	return s.readLocks(endpoint)
+}
+
+// readLocks reads the endpoint's locks from disk and refreshes the cache.
+func (s *FileLockStore) readLocks(endpoint string) ([]Lock, error) {
 	key := sanitise.Endpoint(endpoint)
 	path := s.lockFilePath(endpoint)
 
-	info, statErr := os.Stat(path)
-
-	if cached, ok := s.cache.Load(key); ok {
-		c := cached.(cachedLocks) //nolint:forcetypeassert // type is guaranteed by cache store
-		if statErr != nil {
-			// File gone — cache is valid only if it was already empty.
-			if errors.Is(statErr, os.ErrNotExist) && len(c.locks) == 0 {
-				return nil, nil
-			}
-			// File disappeared but cache had locks — invalidate.
-			if errors.Is(statErr, os.ErrNotExist) {
-				s.cache.Delete(key)
-				return nil, nil
-			}
-			return nil, fmt.Errorf("stat locks file: %w", statErr)
-		}
-		// File exists and metadata matches — cache hit.
-		if c.modTime.Equal(info.ModTime()) && c.size == info.Size() {
-			return slices.Clone(c.locks), nil
-		}
-		// Metadata changed — fall through to re-read.
+	info, err := os.Stat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		s.cache.Delete(key)
+		return nil, nil
 	}
-
-	if statErr != nil {
-		if errors.Is(statErr, os.ErrNotExist) {
-			return nil, nil
-		}
-		return nil, fmt.Errorf("stat locks file: %w", statErr)
+	if err != nil {
+		return nil, fmt.Errorf("stat locks file: %w", err)
 	}
 
 	data, err := os.ReadFile(path) //nolint:gosec // path is constructed from sanitised endpoint name
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
+			s.cache.Delete(key)
 			return nil, nil
 		}
 		return nil, fmt.Errorf("reading locks: %w", err)
@@ -149,11 +155,7 @@ func (s *FileLockStore) loadLocks(endpoint string) ([]Lock, error) {
 	if err := json.Unmarshal(data, &locks); err != nil {
 		return nil, fmt.Errorf("parsing locks: %w", err)
 	}
-	s.cache.Store(key, cachedLocks{
-		locks:   slices.Clone(locks),
-		modTime: info.ModTime(),
-		size:    info.Size(),
-	})
+	s.cache.Store(key, cachedLocks{locks: slices.Clone(locks), info: info})
 	return locks, nil
 }
 
@@ -206,11 +208,7 @@ func (s *FileLockStore) saveLocks(endpoint string, locks []Lock) error {
 		s.cache.Delete(sanitise.Endpoint(endpoint))
 		return nil
 	}
-	s.cache.Store(sanitise.Endpoint(endpoint), cachedLocks{
-		locks:   slices.Clone(locks),
-		modTime: info.ModTime(),
-		size:    info.Size(),
-	})
+	s.cache.Store(sanitise.Endpoint(endpoint), cachedLocks{locks: slices.Clone(locks), info: info})
 	return nil
 }
 
@@ -219,11 +217,13 @@ func (s *FileLockStore) Create(ctx context.Context, endpoint, path, ownerName st
 	if err := ctx.Err(); err != nil {
 		return Lock{}, err
 	}
-	mu := s.endpointMutex(endpoint)
-	mu.Lock()
-	defer mu.Unlock()
+	unlock, err := s.lockEndpoint(endpoint)
+	if err != nil {
+		return Lock{}, err
+	}
+	defer unlock()
 
-	locks, err := s.loadLocks(endpoint)
+	locks, err := s.readLocks(endpoint)
 	if err != nil {
 		return Lock{}, err
 	}
@@ -314,11 +314,13 @@ func (s *FileLockStore) Unlock(ctx context.Context, endpoint, id, requester stri
 	if err := ctx.Err(); err != nil {
 		return Lock{}, err
 	}
-	mu := s.endpointMutex(endpoint)
-	mu.Lock()
-	defer mu.Unlock()
+	unlock, err := s.lockEndpoint(endpoint)
+	if err != nil {
+		return Lock{}, err
+	}
+	defer unlock()
 
-	locks, err := s.loadLocks(endpoint)
+	locks, err := s.readLocks(endpoint)
 	if err != nil {
 		return Lock{}, err
 	}

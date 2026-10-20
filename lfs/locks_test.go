@@ -3,6 +3,7 @@ package lfs
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"testing"
 )
@@ -288,6 +289,33 @@ func TestFileLockStoreConcurrentCreate(t *testing.T) {
 	}
 	if conflicts != 9 {
 		t.Errorf("expected 9 conflicts, got %d", conflicts)
+	}
+}
+
+func TestFileLockStoreSeparateStoresKeepAllLocks(t *testing.T) {
+	dir := t.TempDir()
+	ctx := t.Context()
+	const perStore = 40
+
+	var wg sync.WaitGroup
+	for store := range 2 {
+		s := NewFileLockStore(dir)
+		wg.Go(func() {
+			for i := range perStore {
+				if _, err := s.Create(ctx, "/repo", fmt.Sprintf("store-%d/file-%d.bin", store, i), "user"); err != nil {
+					t.Errorf("Create: %v", err)
+				}
+			}
+		})
+	}
+	wg.Wait()
+
+	locks, _, err := NewFileLockStore(dir).List(ctx, "/repo", ListLocksOptions{Limit: maxLockLimit})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(locks) != 2*perStore {
+		t.Fatalf("expected %d locks on disk, got %d", 2*perStore, len(locks))
 	}
 }
 
