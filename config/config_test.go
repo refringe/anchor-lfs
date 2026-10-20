@@ -71,11 +71,14 @@ authentication = "none"
 		t.Fatalf("Load: %v", err)
 	}
 
-	if cfg.Options.RateLimitTokens != 10000 {
-		t.Errorf("default RateLimitTokens = %d, want 10000", cfg.Options.RateLimitTokens)
+	if cfg.Options.RateLimitTokens != 600 {
+		t.Errorf("default RateLimitTokens = %d, want 600", cfg.Options.RateLimitTokens)
 	}
-	if cfg.Options.RateLimitWindow != "24h" {
-		t.Errorf("default RateLimitWindow = %q, want %q", cfg.Options.RateLimitWindow, "24h")
+	if cfg.Options.RateLimitWindow != "1m" {
+		t.Errorf("default RateLimitWindow = %q, want %q", cfg.Options.RateLimitWindow, "1m")
+	}
+	if cfg.Options.RateLimitInterval != time.Minute {
+		t.Errorf("default RateLimitInterval = %v, want %v", cfg.Options.RateLimitInterval, time.Minute)
 	}
 }
 

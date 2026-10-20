@@ -175,10 +175,10 @@ func (c *Config) applyDefaults() {
 		c.Options.MaxUploadSize = 5 << 30 // 5 GiB
 	}
 	if c.Options.RateLimitTokens == 0 {
-		c.Options.RateLimitTokens = 10000
+		c.Options.RateLimitTokens = 600
 	}
 	if c.Options.RateLimitWindow == "" {
-		c.Options.RateLimitWindow = "24h"
+		c.Options.RateLimitWindow = "1m"
 	}
 	if c.Options.AuthCacheTTL == "" {
 		c.Options.AuthCacheTTL = "60s"

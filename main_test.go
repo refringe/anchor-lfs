@@ -2,10 +2,12 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json/v2"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -13,9 +15,12 @@ import (
 	"path/filepath"
 	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/sethvargo/go-limiter/memorystore"
 
 	"github.com/refringe/anchor-lfs/auth"
 	"github.com/refringe/anchor-lfs/config"
@@ -77,8 +82,8 @@ func TestLoadOrGenerateSigningKeyRejectsTooShort(t *testing.T) {
 	}
 }
 
-// newIntegrationServer starts a test server with the LFS routes for the /org/repo endpoint registered.
-func newIntegrationServer(t *testing.T) (*httptest.Server, *storage.Local) {
+// newIntegrationServer starts a test server for the /org/repo endpoint, allowing rateLimitTokens per minute per IP.
+func newIntegrationServer(t *testing.T, rateLimitTokens uint64) (*httptest.Server, *storage.Local) {
 	t.Helper()
 	dir := t.TempDir()
 	store := storage.NewLocal(dir)
@@ -105,15 +110,14 @@ func newIntegrationServer(t *testing.T) (*httptest.Server, *storage.Local) {
 		LockStore:     lockStore,
 	})
 
+	rateLimitStore, err := memorystore.New(&memorystore.Config{Tokens: rateLimitTokens, Interval: time.Minute})
+	if err != nil {
+		t.Fatalf("creating rate limiter: %v", err)
+	}
+	t.Cleanup(func() { _ = rateLimitStore.Close(context.Background()) })
+
 	mux := http.NewServeMux()
-	mux.Handle(fmt.Sprintf("POST %s/objects/batch", ep.Path), http.HandlerFunc(handler.BatchHandler))
-	mux.Handle(fmt.Sprintf("GET %s/objects/{oid}", ep.Path), http.HandlerFunc(handler.DownloadHandler))
-	mux.Handle(fmt.Sprintf("PUT %s/objects/{oid}", ep.Path), http.HandlerFunc(handler.UploadHandler))
-	mux.Handle(fmt.Sprintf("POST %s/objects/verify", ep.Path), http.HandlerFunc(handler.VerifyHandler))
-	mux.Handle(fmt.Sprintf("POST %s/locks", ep.Path), http.HandlerFunc(handler.CreateLockHandler))
-	mux.Handle(fmt.Sprintf("GET %s/locks", ep.Path), http.HandlerFunc(handler.ListLocksHandler))
-	mux.Handle(fmt.Sprintf("POST %s/locks/verify", ep.Path), http.HandlerFunc(handler.VerifyLocksHandler))
-	mux.Handle(fmt.Sprintf("POST %s/locks/{id}/unlock", ep.Path), http.HandlerFunc(handler.UnlockHandler))
+	registerRoutes(mux, ep.Path, handler, rateLimitStore)
 
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
@@ -154,7 +158,7 @@ func TestEnsureWritableDirRejectsReadOnlyDirectory(t *testing.T) {
 }
 
 func TestIntegrationRouting(t *testing.T) {
-	srv, _ := newIntegrationServer(t)
+	srv, _ := newIntegrationServer(t, 1000)
 
 	ctx := t.Context()
 	client := srv.Client()
@@ -271,6 +275,73 @@ func TestIntegrationRouting(t *testing.T) {
 	}
 }
 
+// doLFSRequest sends a request with Git LFS JSON headers and returns its status, Retry-After header and body.
+func doLFSRequest(t *testing.T, srv *httptest.Server, method, url string, body []byte) (status int, retryAfter string, respBody []byte) {
+	t.Helper()
+	req, err := http.NewRequestWithContext(t.Context(), method, url, bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("creating %s request: %v", method, err)
+	}
+	req.Header.Set("Accept", "application/vnd.git-lfs+json")
+	req.Header.Set("Content-Type", "application/vnd.git-lfs+json")
+	resp, err := srv.Client().Do(req)
+	if err != nil {
+		t.Fatalf("%s %s: %v", method, url, err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	respBody, err = io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("reading response: %v", err)
+	}
+	return resp.StatusCode, resp.Header.Get("Retry-After"), respBody
+}
+
+func TestIntegrationRateLimitsOnlyControlRoutes(t *testing.T) {
+	srv, _ := newIntegrationServer(t, 2)
+	batchURL := srv.URL + "/org/repo/objects/batch"
+	data := []byte("rate limit test data")
+	objects := []lfs.Object{{OID: testutil.SHA256Hex(data), Size: int64(len(data))}}
+
+	actions := func(operation string) map[string]lfs.Action {
+		t.Helper()
+		body, _ := json.Marshal(lfs.BatchRequest{Operation: operation, Objects: objects})
+		status, _, respBody := doLFSRequest(t, srv, http.MethodPost, batchURL, body)
+		if status != http.StatusOK {
+			t.Fatalf("%s batch: expected 200, got %d", operation, status)
+		}
+		var resp lfs.BatchResponse
+		if err := json.Unmarshal(respBody, &resp); err != nil {
+			t.Fatalf("decoding batch response: %v", err)
+		}
+		return resp.Objects[0].Actions
+	}
+
+	upload := actions("upload")
+	if status, _, _ := doLFSRequest(t, srv, http.MethodPut, upload["upload"].Href, data); status != http.StatusOK {
+		t.Fatalf("upload: expected 200, got %d", status)
+	}
+	download := actions("download")
+
+	verifyBody, _ := json.Marshal(lfs.VerifyRequest{OID: objects[0].OID, Size: objects[0].Size})
+	for i := range 5 {
+		if status, _, _ := doLFSRequest(t, srv, http.MethodPost, upload["verify"].Href, verifyBody); status != http.StatusOK {
+			t.Fatalf("verify %d: expected 200, got %d", i+1, status)
+		}
+		if status, _, _ := doLFSRequest(t, srv, http.MethodGet, download["download"].Href, nil); status != http.StatusOK {
+			t.Fatalf("download %d: expected 200, got %d", i+1, status)
+		}
+	}
+
+	body, _ := json.Marshal(lfs.BatchRequest{Operation: "download", Objects: objects})
+	status, retryAfter, _ := doLFSRequest(t, srv, http.MethodPost, batchURL, body)
+	if status != http.StatusTooManyRequests {
+		t.Fatalf("third batch: expected 429, got %d", status)
+	}
+	if seconds, err := strconv.Atoi(retryAfter); err != nil || seconds < 1 || seconds > 60 {
+		t.Errorf("Retry-After = %q, want 1 to 60 seconds", retryAfter)
+	}
+}
+
 func TestIntegrationGitLFSClientPush(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping git-lfs client test in short mode")
@@ -281,7 +352,7 @@ func TestIntegrationGitLFSClientPush(t *testing.T) {
 		}
 	}
 
-	srv, store := newIntegrationServer(t)
+	srv, store := newIntegrationServer(t, 1000)
 
 	home := t.TempDir()
 	env := slices.DeleteFunc(os.Environ(), func(kv string) bool {

@@ -12,7 +12,7 @@ A lightweight, standalone [Git LFS](https://git-lfs.com/) server written in Go t
 - HMAC-signed transfer URLs with configurable expiration
 - SHA-256 integrity verification on upload
 - Configurable per-endpoint visibility (public/private)
-- Per-IP rate limiting with configurable token bucket
+- Per-IP rate limiting on the batch and lock API
 - Docker-first deployment
 
 ## Quick Start

@@ -117,12 +117,12 @@ The job display names above are the required status check contexts in the reposi
 
 ## API Routes
 
-All routes are registered in `main.go` with explicit HTTP methods on `http.ServeMux`. Each endpoint prefix is configurable via `config.toml`:
+All endpoint routes are registered in `registerRoutes` in `main.go` with explicit HTTP methods on `http.ServeMux`. Batch and lock routes are rate limited per IP; the HMAC-signed transfer routes are not. Each endpoint prefix is configurable via `config.toml`:
 
 - `POST {prefix}/objects/batch` — Transfer negotiation
 - `GET {prefix}/objects/{oid}` — Download (HMAC-signed URL)
 - `PUT {prefix}/objects/{oid}` — Upload (HMAC-signed URL)
-- `POST {prefix}/objects/verify` — Integrity verification
+- `POST {prefix}/objects/verify` — Integrity verification (HMAC-signed URL)
 - `POST/GET {prefix}/locks` — File locking
 - `POST {prefix}/locks/verify` — Lock ownership verification
 - `POST {prefix}/locks/{id}/unlock` — Unlock

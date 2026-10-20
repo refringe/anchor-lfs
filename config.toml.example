@@ -9,9 +9,10 @@ additional_logging = false
 # Maximum upload size in bytes (default: 5 GiB = 5368709120).
 #max_upload_size = 5368709120
 
-# Rate limiting: tokens per window (default: 10000 per 24h).
-#rate_limit_tokens = 10000
-#rate_limit_window = "24h"
+# Per-IP rate limit on batch and lock requests: tokens per fixed window (default: 600 per 1m). Signed object
+# transfers are not rate limited.
+#rate_limit_tokens = 600
+#rate_limit_window = "1m"
 
 # GitHub auth cache TTL (default: 60s). Set to "0s" to disable caching.
 #auth_cache_ttl = "60s"

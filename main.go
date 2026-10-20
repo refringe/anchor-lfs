@@ -17,6 +17,7 @@ import (
 
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
+	"github.com/sethvargo/go-limiter"
 	"github.com/sethvargo/go-limiter/memorystore"
 
 	"github.com/refringe/anchor-lfs/auth"
@@ -154,25 +155,7 @@ func main() {
 		})
 
 		prefix := ep.Path
-
-		// Batch API — rate limited.
-		mux.Handle(fmt.Sprintf("POST %s/objects/batch", prefix), middleware.RateLimit(rateLimitStore, http.HandlerFunc(handler.BatchHandler)))
-
-		// Download — rate limited.
-		mux.Handle(fmt.Sprintf("GET %s/objects/{oid}", prefix), middleware.RateLimit(rateLimitStore, http.HandlerFunc(handler.DownloadHandler)))
-
-		// Upload — not rate limited; uploads are authenticated and size-bounded,
-		// and rate limiting could interfere with legitimate large transfers.
-		mux.Handle(fmt.Sprintf("PUT %s/objects/{oid}", prefix), http.HandlerFunc(handler.UploadHandler))
-
-		// Verify — rate limited.
-		mux.Handle(fmt.Sprintf("POST %s/objects/verify", prefix), middleware.RateLimit(rateLimitStore, http.HandlerFunc(handler.VerifyHandler)))
-
-		// File Locking API — rate limited.
-		mux.Handle(fmt.Sprintf("POST %s/locks", prefix), middleware.RateLimit(rateLimitStore, http.HandlerFunc(handler.CreateLockHandler)))
-		mux.Handle(fmt.Sprintf("GET %s/locks", prefix), middleware.RateLimit(rateLimitStore, http.HandlerFunc(handler.ListLocksHandler)))
-		mux.Handle(fmt.Sprintf("POST %s/locks/verify", prefix), middleware.RateLimit(rateLimitStore, http.HandlerFunc(handler.VerifyLocksHandler)))
-		mux.Handle(fmt.Sprintf("POST %s/locks/{id}/unlock", prefix), middleware.RateLimit(rateLimitStore, http.HandlerFunc(handler.UnlockHandler)))
+		registerRoutes(mux, prefix, handler, rateLimitStore)
 
 		log.Info().
 			Str("name", ep.Name).
@@ -246,6 +229,21 @@ func main() {
 
 	// Zero signing key material in memory.
 	_ = signer.Close()
+}
+
+// registerRoutes adds an endpoint's routes to mux, rate limiting the batch and lock routes but not signed transfers.
+func registerRoutes(mux *http.ServeMux, prefix string, handler *lfs.Handler, rateLimitStore limiter.Store) {
+	limited := func(h http.HandlerFunc) http.Handler { return middleware.RateLimit(rateLimitStore, h) }
+
+	mux.Handle(fmt.Sprintf("POST %s/objects/batch", prefix), limited(handler.BatchHandler))
+	mux.Handle(fmt.Sprintf("POST %s/locks", prefix), limited(handler.CreateLockHandler))
+	mux.Handle(fmt.Sprintf("GET %s/locks", prefix), limited(handler.ListLocksHandler))
+	mux.Handle(fmt.Sprintf("POST %s/locks/verify", prefix), limited(handler.VerifyLocksHandler))
+	mux.Handle(fmt.Sprintf("POST %s/locks/{id}/unlock", prefix), limited(handler.UnlockHandler))
+
+	mux.HandleFunc(fmt.Sprintf("GET %s/objects/{oid}", prefix), handler.DownloadHandler)
+	mux.HandleFunc(fmt.Sprintf("PUT %s/objects/{oid}", prefix), handler.UploadHandler)
+	mux.HandleFunc(fmt.Sprintf("POST %s/objects/verify", prefix), handler.VerifyHandler)
 }
 
 // ensureWritableDir creates dir if it is missing and confirms the current process can create files in it.
