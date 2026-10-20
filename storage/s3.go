@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -29,6 +30,12 @@ const (
 	s3PartSize int64 = 8 << 20
 	s3MaxParts int64 = 10000
 )
+
+// s3MaxPutSize is the largest object S3 accepts in a single PUT request.
+const s3MaxPutSize int64 = 5 << 30
+
+// ErrObjectTooLarge is returned when an object is too large for a presigned upload.
+var ErrObjectTooLarge = errors.New("object too large for a presigned upload")
 
 // Compile-time interface checks.
 var (
@@ -310,21 +317,44 @@ func (s *PresignedS3) PresignGet(ctx context.Context, endpoint, oid string, expi
 	return resp.URL, nil
 }
 
-// PresignPut returns a presigned PUT URL for direct client uploads.
-func (s *PresignedS3) PresignPut(ctx context.Context, endpoint, oid string, expiry time.Duration) (string, error) {
+// PresignPut returns a PUT URL accepting only size bytes that hash to oid, and the headers the upload must send.
+func (s *PresignedS3) PresignPut(ctx context.Context, endpoint, oid string, size int64, expiry time.Duration) (string, map[string]string, error) {
 	key, err := s.objectKey(endpoint, oid)
 	if err != nil {
-		return "", err
+		return "", nil, err
+	}
+	if size > s3MaxPutSize {
+		return "", nil, fmt.Errorf("%w: %d bytes exceeds %d", ErrObjectTooLarge, size, s3MaxPutSize)
+	}
+	digest, err := hex.DecodeString(oid)
+	if err != nil {
+		return "", nil, fmt.Errorf("decoding OID %s: %w", oid, err)
 	}
 
 	resp, err := s.presigner.PresignPutObject(ctx, &s3.PutObjectInput{
-		Bucket: aws.String(s.bucket),
-		Key:    aws.String(key),
-	}, s3.WithPresignExpires(expiry))
+		Bucket:         aws.String(s.bucket),
+		Key:            aws.String(key),
+		ContentLength:  aws.Int64(size),
+		ChecksumSHA256: aws.String(base64.StdEncoding.EncodeToString(digest)),
+	}, s3.WithPresignExpires(expiry), withSignedHeaders)
 	if err != nil {
-		return "", fmt.Errorf("presigning PUT for %s: %w", oid, err)
+		return "", nil, fmt.Errorf("presigning PUT for %s: %w", oid, err)
 	}
-	return resp.URL, nil
+
+	header := make(map[string]string)
+	for name, values := range resp.SignedHeader {
+		if name != "Host" && name != "Content-Length" && len(values) > 0 {
+			header[name] = values[0]
+		}
+	}
+	return resp.URL, header, nil
+}
+
+// withSignedHeaders keeps x-amz-* headers as signed headers instead of hoisting them into the query string.
+func withSignedHeaders(o *s3.PresignOptions) {
+	o.Presigner = v4.NewSigner(func(so *v4.SignerOptions) {
+		so.DisableHeaderHoisting = true
+	})
 }
 
 // objectKey returns the sharded S3 object key for the given endpoint and OID, or ErrInvalidOID when oid is not a

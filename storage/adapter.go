@@ -20,5 +20,5 @@ type Adapter interface {
 // PresignedURLProvider is implemented by adapters that hand out direct client-to-storage URLs instead of proxy URLs.
 type PresignedURLProvider interface {
 	PresignGet(ctx context.Context, endpoint, oid string, expiry time.Duration) (href string, err error)
-	PresignPut(ctx context.Context, endpoint, oid string, expiry time.Duration) (href string, err error)
+	PresignPut(ctx context.Context, endpoint, oid string, size int64, expiry time.Duration) (href string, header map[string]string, err error)
 }

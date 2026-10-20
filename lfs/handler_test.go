@@ -6,6 +6,7 @@ import (
 	"encoding/json/v2"
 	"errors"
 	"fmt"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -957,6 +958,74 @@ type spaceAwareStore struct {
 
 func (s *spaceAwareStore) AvailableSpace(_ context.Context) (uint64, error) {
 	return s.avail, s.availErr
+}
+
+// presigningStore wraps a real storage adapter with presigned URLs that refuse objects larger than maxSize.
+type presigningStore struct {
+	storage.Adapter
+	maxSize int64
+}
+
+func (s *presigningStore) PresignGet(_ context.Context, _, oid string, _ time.Duration) (string, error) {
+	return "https://storage.example/" + oid, nil
+}
+
+func (s *presigningStore) PresignPut(_ context.Context, _, oid string, size int64, _ time.Duration) (string, map[string]string, error) {
+	if size > s.maxSize {
+		return "", nil, storage.ErrObjectTooLarge
+	}
+	return "https://storage.example/" + oid, map[string]string{"X-Amz-Checksum-Sha256": "checksum-" + oid}, nil
+}
+
+func TestBatchUploadPresigned(t *testing.T) {
+	oid := "deadbeef00000000000000000000000000000000000000000000000000000000"
+	tests := []struct {
+		name       string
+		size       int64
+		wantHeader map[string]string
+		wantError  int
+	}{
+		{name: "headers forwarded", size: 100, wantHeader: map[string]string{"X-Amz-Checksum-Sha256": "checksum-" + oid}},
+		{name: "too large to presign", size: 101, wantError: http.StatusUnprocessableEntity},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h, local, _ := testHandler(t)
+			h.store = &presigningStore{Adapter: local, maxSize: 100}
+
+			b, _ := json.Marshal(BatchRequest{Operation: "upload", Objects: []Object{{OID: oid, Size: tt.size}}})
+			req := httptest.NewRequestWithContext(context.Background(), "POST", "/org/repo/objects/batch", bytes.NewReader(b))
+			req.Header.Set("Accept", lfsMediaType)
+			req.Header.Set("Content-Type", lfsMediaType)
+			w := httptest.NewRecorder()
+			h.BatchHandler(w, req)
+
+			if w.Code != http.StatusOK {
+				t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+			}
+			var resp BatchResponse
+			if err := json.UnmarshalRead(w.Body, &resp); err != nil {
+				t.Fatalf("decoding response: %v", err)
+			}
+			obj := resp.Objects[0]
+			if tt.wantError != 0 {
+				if obj.Error == nil || obj.Error.Code != tt.wantError {
+					t.Fatalf("object error = %+v, want code %d", obj.Error, tt.wantError)
+				}
+				return
+			}
+			upload, ok := obj.Actions["upload"]
+			if !ok {
+				t.Fatalf("expected upload action, got %+v", obj)
+			}
+			if !maps.Equal(upload.Header, tt.wantHeader) {
+				t.Errorf("upload header = %v, want %v", upload.Header, tt.wantHeader)
+			}
+			if _, ok := obj.Actions["verify"]; !ok {
+				t.Error("expected verify action")
+			}
+		})
+	}
 }
 
 func TestBatchUploadInsufficientStorage(t *testing.T) {

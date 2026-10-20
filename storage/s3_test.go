@@ -3,10 +3,14 @@ package storage
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"math"
+	"net/url"
 	"testing"
 	"time"
 
@@ -399,27 +403,84 @@ func TestS3ObjectKey(t *testing.T) {
 	}
 }
 
+// sdkPresignedS3Store returns a PresignedS3 that presigns with the real SDK, which needs no network access.
+func sdkPresignedS3Store(t *testing.T) *PresignedS3 {
+	t.Helper()
+	client, err := newS3Client(t.Context(), S3Config{
+		Region:          "us-east-1",
+		Endpoint:        "http://127.0.0.1:9000",
+		AccessKeyID:     "id",
+		SecretAccessKey: "secret",
+		ForcePathStyle:  true,
+	})
+	if err != nil {
+		t.Fatalf("newS3Client: %v", err)
+	}
+	return &PresignedS3{S3: &S3{client: client, bucket: "test-bucket", prefix: "lfs/"}, presigner: s3.NewPresignClient(client)}
+}
+
+// signedHeaders returns a presigned URL's X-Amz-SignedHeaders and whether it has an X-Amz-Checksum-Sha256 parameter.
+func signedHeaders(t *testing.T, href string) (signed string, hoistedChecksum bool) {
+	t.Helper()
+	u, err := url.Parse(href)
+	if err != nil {
+		t.Fatalf("parsing presigned URL: %v", err)
+	}
+	return u.Query().Get("X-Amz-SignedHeaders"), u.Query().Has("X-Amz-Checksum-Sha256")
+}
+
 func TestS3PresignGet(t *testing.T) {
-	store := testPresignedS3Store(t, &mockPresigner{})
+	store := sdkPresignedS3Store(t)
 
 	href, err := store.PresignGet(t.Context(), "/org/repo", "4d7a214614ab2935c943f9e0ff69d22eadbb8f32b1258daaa5e2ca24d17e2393", 10*time.Minute)
 	if err != nil {
 		t.Fatalf("PresignGet: %v", err)
 	}
-	if href == "" {
-		t.Error("expected non-empty presigned URL")
+	if signed, _ := signedHeaders(t, href); signed != "host" {
+		t.Errorf("X-Amz-SignedHeaders = %q, want %q", signed, "host")
 	}
 }
 
 func TestS3PresignPut(t *testing.T) {
-	store := testPresignedS3Store(t, &mockPresigner{})
+	store := sdkPresignedS3Store(t)
+	data := []byte("hello world")
+	sum := sha256.Sum256(data)
 
-	href, err := store.PresignPut(t.Context(), "/org/repo", "4d7a214614ab2935c943f9e0ff69d22eadbb8f32b1258daaa5e2ca24d17e2393", 10*time.Minute)
+	href, header, err := store.PresignPut(t.Context(), "/org/repo", testutil.SHA256Hex(data), int64(len(data)), 10*time.Minute)
 	if err != nil {
 		t.Fatalf("PresignPut: %v", err)
 	}
-	if href == "" {
-		t.Error("expected non-empty presigned URL")
+
+	signed, hoistedChecksum := signedHeaders(t, href)
+	if want := "content-length;host;x-amz-checksum-sha256"; signed != want {
+		t.Errorf("X-Amz-SignedHeaders = %q, want %q", signed, want)
+	}
+	if hoistedChecksum {
+		t.Error("checksum was hoisted into the query string, where S3 does not enforce it")
+	}
+	want := map[string]string{"X-Amz-Checksum-Sha256": base64.StdEncoding.EncodeToString(sum[:])}
+	if !maps.Equal(header, want) {
+		t.Errorf("header = %v, want %v", header, want)
+	}
+}
+
+func TestS3PresignPutSizeLimit(t *testing.T) {
+	tests := []struct {
+		name    string
+		size    int64
+		wantErr error
+	}{
+		{name: "at limit", size: s3MaxPutSize},
+		{name: "over limit", size: s3MaxPutSize + 1, wantErr: ErrObjectTooLarge},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := testPresignedS3Store(t, &mockPresigner{})
+			_, _, err := store.PresignPut(t.Context(), "/org/repo", "4d7a214614ab2935c943f9e0ff69d22eadbb8f32b1258daaa5e2ca24d17e2393", tt.size, 10*time.Minute)
+			if !errors.Is(err, tt.wantErr) {
+				t.Fatalf("PresignPut error = %v, want %v", err, tt.wantErr)
+			}
+		})
 	}
 }
 
@@ -454,7 +515,7 @@ func TestS3PresignError(t *testing.T) {
 		t.Fatal("expected error from presigner")
 	}
 
-	_, err = store.PresignPut(t.Context(), "/org/repo", "4d7a214614ab2935c943f9e0ff69d22eadbb8f32b1258daaa5e2ca24d17e2393", 10*time.Minute)
+	_, _, err = store.PresignPut(t.Context(), "/org/repo", "4d7a214614ab2935c943f9e0ff69d22eadbb8f32b1258daaa5e2ca24d17e2393", 11, 10*time.Minute)
 	if err == nil {
 		t.Fatal("expected error from presigner")
 	}

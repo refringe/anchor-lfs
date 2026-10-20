@@ -122,7 +122,11 @@ func (h *Handler) processUpload(r *http.Request, obj Object, baseURL string) Obj
 	// When the storage backend provides presigned URLs, return a direct-to-storage upload URL. The verify action always
 	// points back at this server because verification is a server-side check against storage.
 	if p, ok := h.store.(storage.PresignedURLProvider); ok {
-		href, err := p.PresignPut(r.Context(), h.endpoint.Path, obj.OID, h.signer.Expiry())
+		href, header, err := p.PresignPut(r.Context(), h.endpoint.Path, obj.OID, obj.Size, h.signer.Expiry())
+		if errors.Is(err, storage.ErrObjectTooLarge) {
+			resp.Error = &ObjectError{Code: 422, Message: "object exceeds the maximum size for a direct upload to storage"}
+			return resp
+		}
 		if err != nil {
 			log.Error().Err(err).Str("oid", obj.OID).Msg("presigning upload URL")
 			resp.Error = &ObjectError{Code: 500, Message: msgInternalError}
@@ -133,7 +137,7 @@ func (h *Handler) processUpload(r *http.Request, obj Object, baseURL string) Obj
 		resp.Authenticated = new(bool)
 		*resp.Authenticated = true
 		resp.Actions = map[string]Action{
-			opUpload: {Href: href, ExpiresIn: int64(h.signer.Expiry().Seconds())},
+			opUpload: {Href: href, Header: header, ExpiresIn: int64(h.signer.Expiry().Seconds())},
 			"verify": {
 				Href:      signedVerify.Href,
 				ExpiresIn: signedVerify.ExpiresIn,
