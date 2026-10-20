@@ -174,22 +174,7 @@ func main() {
 			Msg("registered endpoint")
 	}
 
-	mux.HandleFunc("GET /health", func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.MarshalWrite(w, map[string]string{
-			"status":  "ok",
-			"version": version,
-		})
-	})
-
-	mux.HandleFunc("GET /", func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/" {
-			http.NotFound(w, r)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.MarshalWrite(w, map[string]string{"version": version})
-	})
+	registerServiceRoutes(mux)
 
 	var handler http.Handler = mux
 	if cfg.Options.AdditionalLogging {
@@ -238,6 +223,22 @@ func main() {
 
 	// Zero signing key material in memory.
 	_ = signer.Close()
+}
+
+// registerServiceRoutes adds the health check, the version at the root, and a JSON 404 for every other path to mux.
+func registerServiceRoutes(mux *http.ServeMux) {
+	mux.HandleFunc("GET /health", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.MarshalWrite(w, map[string]string{
+			"status":  "ok",
+			"version": version,
+		})
+	})
+	mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.MarshalWrite(w, map[string]string{"version": version})
+	})
+	mux.HandleFunc("/", lfs.NotFoundHandler)
 }
 
 // registerRoutes adds an endpoint's routes to mux, rate limiting the batch and lock routes but not signed transfers.

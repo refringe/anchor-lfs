@@ -118,6 +118,7 @@ func newIntegrationServer(t *testing.T, rateLimitTokens uint64) (*httptest.Serve
 
 	mux := http.NewServeMux()
 	registerRoutes(mux, ep.Path, handler, rateLimitStore)
+	registerServiceRoutes(mux)
 
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
@@ -339,6 +340,54 @@ func TestIntegrationRateLimitsOnlyControlRoutes(t *testing.T) {
 	}
 	if seconds, err := strconv.Atoi(retryAfter); err != nil || seconds < 1 || seconds > 60 {
 		t.Errorf("Retry-After = %q, want 1 to 60 seconds", retryAfter)
+	}
+}
+
+func TestIntegrationServiceRoutesAndUnknownPaths(t *testing.T) {
+	srv, _ := newIntegrationServer(t, 1000)
+	tests := []struct {
+		method          string
+		path            string
+		wantStatus      int
+		wantContentType string
+		wantKey         string
+	}{
+		{http.MethodGet, "/", http.StatusOK, "application/json", "version"},
+		{http.MethodGet, "/health", http.StatusOK, "application/json", "status"},
+		{http.MethodGet, "/unknown/path", http.StatusNotFound, "application/vnd.git-lfs+json", "message"},
+		{http.MethodPost, "/", http.StatusNotFound, "application/vnd.git-lfs+json", "message"},
+		{http.MethodPost, "/org/wrong-repo/objects/batch", http.StatusNotFound, "application/vnd.git-lfs+json", "message"},
+		{http.MethodPost, "/org/wrong-repo/locks/verify", http.StatusNotFound, "application/vnd.git-lfs+json", "message"},
+		{http.MethodPost, "/org/repo.git/info/lfs/objects/batch", http.StatusNotFound, "application/vnd.git-lfs+json", "message"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.method+" "+tt.path, func(t *testing.T) {
+			req, err := http.NewRequestWithContext(t.Context(), tt.method, srv.URL+tt.path, strings.NewReader("{}"))
+			if err != nil {
+				t.Fatalf("creating request: %v", err)
+			}
+			req.Header.Set("Accept", "application/vnd.git-lfs+json")
+			req.Header.Set("Content-Type", "application/vnd.git-lfs+json")
+			resp, err := srv.Client().Do(req)
+			if err != nil {
+				t.Fatalf("request: %v", err)
+			}
+			defer func() { _ = resp.Body.Close() }()
+
+			if resp.StatusCode != tt.wantStatus {
+				t.Errorf("status = %d, want %d", resp.StatusCode, tt.wantStatus)
+			}
+			if got := resp.Header.Get("Content-Type"); got != tt.wantContentType {
+				t.Errorf("Content-Type = %q, want %q", got, tt.wantContentType)
+			}
+			var body map[string]any
+			if err := json.UnmarshalRead(resp.Body, &body); err != nil {
+				t.Fatalf("decoding body: %v", err)
+			}
+			if _, ok := body[tt.wantKey]; !ok {
+				t.Errorf("body %v has no %q field", body, tt.wantKey)
+			}
+		})
 	}
 }
 

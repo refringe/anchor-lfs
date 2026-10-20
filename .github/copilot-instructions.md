@@ -129,6 +129,7 @@ All endpoint routes are registered in `registerRoutes` in `main.go` with explici
 - `POST {prefix}/locks/verify` — Lock ownership verification
 - `POST {prefix}/locks/{id}/unlock` — Unlock
 - `GET /health` — Health check
+- `GET /` — Version; every other path and method gets a JSON 404 (`registerServiceRoutes`)
 
 ## Configuration
 

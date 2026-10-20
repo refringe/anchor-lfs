@@ -678,6 +678,12 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	_, _ = w.Write(data)
 }
 
+// NotFoundHandler answers requests for paths with no Git LFS route with a JSON 404.
+func NotFoundHandler(w http.ResponseWriter, r *http.Request) {
+	r = assignRequestID(w, r)
+	writeError(w, r, http.StatusNotFound, "no Git LFS endpoint at this path")
+}
+
 func writeError(w http.ResponseWriter, r *http.Request, status int, message string) {
 	resp := ErrorResponse{
 		Message:          message,
