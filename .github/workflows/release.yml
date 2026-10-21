@@ -82,6 +82,6 @@ jobs:
             ## Docker
 
             ```
-            docker pull ghcr.io/${{ github.repository }}:${{ github.ref_name }}
+            docker pull ghcr.io/${{ github.repository }}:${{ steps.docker-meta.outputs.version }}
             ```
           generate_release_notes: false
