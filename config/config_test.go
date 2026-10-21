@@ -1,6 +1,7 @@
 package config
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -332,31 +333,141 @@ authentication = "none"
 	}
 }
 
-func TestLoadNoEndpoints(t *testing.T) {
-	path := writeConfig(t, `
-[options]
-listen_address = ":5420"
-`)
-
-	_, err := Load(path)
-	if err == nil {
-		t.Fatal("expected error for no endpoints")
+func TestLoadProblemMessages(t *testing.T) {
+	endpoint := func(settings string) string {
+		return "[[endpoints]]\nurl = \"https://github.com/org/repo\"\nendpoint = \"/org/repo\"\n" + settings
+	}
+	tests := []struct {
+		name   string
+		config string
+		want   string
+	}{
+		{
+			name:   "no endpoints",
+			config: "[options]\nlisten_address = \":5420\"\n",
+			want:   "no endpoints configured; add an [[endpoints]] block (see config.toml.example)",
+		},
+		{
+			name:   "missing name",
+			config: endpoint("visibility = \"public\"\nauthentication = \"none\"\n"),
+			want:   "endpoint #1: missing name",
+		},
+		{
+			name:   "missing visibility",
+			config: endpoint("name = \"Test\"\nauthentication = \"none\"\n"),
+			want:   `endpoint "Test": missing visibility (must be "public" or "private")`,
+		},
+		{
+			name:   "unknown visibility",
+			config: endpoint("name = \"Test\"\nvisibility = \"secret\"\nauthentication = \"none\"\n"),
+			want:   `endpoint "Test": unknown visibility "secret" (must be "public" or "private")`,
+		},
+		{
+			name:   "missing authentication",
+			config: endpoint("name = \"Test\"\nvisibility = \"public\"\n"),
+			want:   `endpoint "Test": missing authentication (must be "github" or "none")`,
+		},
+		{
+			name:   "unknown authentication",
+			config: endpoint("name = \"Test\"\nvisibility = \"public\"\nauthentication = \"ldap\"\n"),
+			want:   `endpoint "Test": unknown authentication "ldap" (must be "github" or "none")`,
+		},
+		{
+			name:   "negative max_upload_size",
+			config: "[options]\nmax_upload_size = -1\n\n" + endpoint("name = \"Test\"\nvisibility = \"public\"\nauthentication = \"none\"\n"),
+			want:   "max_upload_size must be positive",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := Load(writeConfig(t, tt.config))
+			invalid, ok := errors.AsType[*ValidationError](err)
+			if !ok {
+				t.Fatalf("Load error = %v, want *ValidationError", err)
+			}
+			if len(invalid.Problems) != 1 || invalid.Problems[0].Error() != tt.want {
+				t.Errorf("problems = %q, want only %q", invalid.Problems, tt.want)
+			}
+		})
 	}
 }
 
-func TestLoadInvalidAuth(t *testing.T) {
+func TestLoadReportsEveryProblem(t *testing.T) {
+	t.Setenv("ANCHOR_LFS_MAX_UPLOAD_SIZE", "abc")
 	path := writeConfig(t, `
+[options]
+rate_limit_window = "1 day"
+url_expiry = "soon"
+
+[[endpoints]]
+name = "Docs"
+url = "https://github.com/org/docs"
+endpoint = "/org/docs"
+authentication = "github"
+
+[[endpoints]]
+url = "https://github.com/org/repo"
+endpoint = "/org/docs"
+visibility = "public"
+authentication = "none"
+`)
+
+	_, err := Load(path)
+	invalid, ok := errors.AsType[*ValidationError](err)
+	if !ok {
+		t.Fatalf("Load error = %v, want *ValidationError", err)
+	}
+	want := []string{
+		`ANCHOR_LFS_MAX_UPLOAD_SIZE "abc" must be a positive number of bytes`,
+		`invalid rate_limit_window "1 day"`,
+		`invalid url_expiry "soon"`,
+		`endpoint "Docs": missing visibility`,
+		`endpoint #2: missing name`,
+		`endpoint #2: duplicate endpoint path "/org/docs"`,
+	}
+	if len(invalid.Problems) != len(want) {
+		t.Fatalf("got %d problems %q, want %d", len(invalid.Problems), invalid.Problems, len(want))
+	}
+	for i, prefix := range want {
+		if !strings.HasPrefix(invalid.Problems[i].Error(), prefix) {
+			t.Errorf("problem %d = %q, want prefix %q", i, invalid.Problems[i], prefix)
+		}
+	}
+}
+
+func TestEnvOverrideInvalidValues(t *testing.T) {
+	tests := []struct {
+		env   string
+		value string
+		want  string
+	}{
+		{"ANCHOR_LFS_MAX_UPLOAD_SIZE", "abc", `ANCHOR_LFS_MAX_UPLOAD_SIZE "abc" must be a positive number of bytes`},
+		{"ANCHOR_LFS_MAX_UPLOAD_SIZE", "0", `ANCHOR_LFS_MAX_UPLOAD_SIZE "0" must be a positive number of bytes`},
+		{"ANCHOR_LFS_MAX_UPLOAD_SIZE", "-5", `ANCHOR_LFS_MAX_UPLOAD_SIZE "-5" must be a positive number of bytes`},
+		{"ANCHOR_LFS_S3_PRESIGNED_URLS", "yes", `ANCHOR_LFS_S3_PRESIGNED_URLS "yes" must be true or false`},
+		{"ANCHOR_LFS_S3_FORCE_PATH_STYLE", "on", `ANCHOR_LFS_S3_FORCE_PATH_STYLE "on" must be true or false`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.env+"="+tt.value, func(t *testing.T) {
+			t.Setenv(tt.env, tt.value)
+			path := writeConfig(t, `
 [[endpoints]]
 name = "Test"
 url = "https://github.com/org/repo"
 endpoint = "/org/repo"
 visibility = "public"
-authentication = "ldap"
+authentication = "none"
 `)
 
-	_, err := Load(path)
-	if err == nil {
-		t.Fatal("expected error for invalid auth method")
+			_, err := Load(path)
+			invalid, ok := errors.AsType[*ValidationError](err)
+			if !ok {
+				t.Fatalf("Load error = %v, want *ValidationError", err)
+			}
+			if len(invalid.Problems) != 1 || invalid.Problems[0].Error() != tt.want {
+				t.Errorf("problems = %q, want only %q", invalid.Problems, tt.want)
+			}
+		})
 	}
 }
 

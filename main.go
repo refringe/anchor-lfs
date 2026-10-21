@@ -39,6 +39,9 @@ func main() {
 	log.Logger = zerolog.New(os.Stderr).With().Timestamp().Logger()
 
 	cfg, err := config.Load(config.DefaultConfigPath)
+	if invalid, ok := errors.AsType[*config.ValidationError](err); ok {
+		log.Fatal().Errs("errors", invalid.Problems).Msg("failed to load configuration")
+	}
 	if err != nil {
 		log.Fatal().Err(err).Msg("failed to load configuration")
 	}

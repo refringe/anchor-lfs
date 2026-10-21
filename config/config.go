@@ -120,6 +120,14 @@ func (e *Endpoint) AuthMethod() string {
 	return strings.ToLower(e.Authentication)
 }
 
+// label names the endpoint in error messages, using its position when it has no name.
+func (e *Endpoint) label(i int) string {
+	if e.Name == "" {
+		return fmt.Sprintf("endpoint #%d", i+1)
+	}
+	return fmt.Sprintf("endpoint %q", e.Name)
+}
+
 // Load reads and validates the configuration file. The path can be overridden
 // by the ANCHOR_LFS_CONFIG environment variable.
 func Load(path string) (*Config, error) {
@@ -143,35 +151,40 @@ func Load(path string) (*Config, error) {
 	}
 
 	cfg.applyDefaults()
-	cfg.applyEnvOverrides()
 
-	if err := cfg.parseRateLimitWindow(); err != nil {
-		return nil, fmt.Errorf("validating config: %w", err)
-	}
-
-	if err := cfg.parseAuthCacheTTL(); err != nil {
-		return nil, fmt.Errorf("validating config: %w", err)
-	}
-
-	if err := cfg.parseURLExpiry(); err != nil {
-		return nil, fmt.Errorf("validating config: %w", err)
-	}
-
-	if err := cfg.parseSigningKey(); err != nil {
-		return nil, fmt.Errorf("validating config: %w", err)
-	}
-
-	if err := cfg.validate(); err != nil {
-		return nil, fmt.Errorf("validating config: %w", err)
-	}
-
+	problems := cfg.applyEnvOverrides()
+	problems = append(problems, cfg.parseRateLimitWindow(), cfg.parseAuthCacheTTL(), cfg.parseURLExpiry(), cfg.parseSigningKey())
+	problems = append(problems, cfg.validate()...)
 	for i := range cfg.Endpoints {
 		if err := cfg.Endpoints[i].parseGitHubURL(); err != nil {
-			return nil, fmt.Errorf("endpoint %q: %w", cfg.Endpoints[i].Name, err)
+			problems = append(problems, fmt.Errorf("%s: %w", cfg.Endpoints[i].label(i), err))
 		}
 	}
 
+	problems = slices.DeleteFunc(problems, func(err error) bool { return err == nil })
+	if len(problems) > 0 {
+		return nil, &ValidationError{Problems: problems}
+	}
 	return &cfg, nil
+}
+
+// ValidationError lists every problem found in a configuration.
+type ValidationError struct {
+	Problems []error
+}
+
+// Error joins the problems into a single line.
+func (e *ValidationError) Error() string {
+	messages := make([]string, len(e.Problems))
+	for i, err := range e.Problems {
+		messages[i] = err.Error()
+	}
+	return "validating config: " + strings.Join(messages, "; ")
+}
+
+// Unwrap returns the individual problems.
+func (e *ValidationError) Unwrap() []error {
+	return e.Problems
 }
 
 // unrecognisedKeys lists each undecoded key once, leaving out tables whose own keys are listed.
@@ -197,7 +210,7 @@ func (c *Config) applyDefaults() {
 	if c.Options.BaseURL != "" {
 		c.Options.BaseURL = strings.TrimRight(c.Options.BaseURL, "/")
 	}
-	if c.Options.MaxUploadSize <= 0 {
+	if c.Options.MaxUploadSize == 0 {
 		c.Options.MaxUploadSize = 5 << 30 // 5 GiB
 	}
 	if c.Options.TrustedProxies == nil {
@@ -223,7 +236,9 @@ func (c *Config) applyDefaults() {
 	}
 }
 
-func (c *Config) applyEnvOverrides() {
+func (c *Config) applyEnvOverrides() []error {
+	var problems []error
+
 	if v := os.Getenv("ANCHOR_LFS_LISTEN"); v != "" {
 		c.Options.ListenAddress = v
 	}
@@ -247,6 +262,8 @@ func (c *Config) applyEnvOverrides() {
 	if v := os.Getenv("ANCHOR_LFS_MAX_UPLOAD_SIZE"); v != "" {
 		if n, err := strconv.ParseInt(v, 10, 64); err == nil && n > 0 {
 			c.Options.MaxUploadSize = n
+		} else {
+			problems = append(problems, fmt.Errorf("ANCHOR_LFS_MAX_UPLOAD_SIZE %q must be a positive number of bytes", v))
 		}
 	}
 
@@ -272,16 +289,28 @@ func (c *Config) applyEnvOverrides() {
 	if v := os.Getenv("ANCHOR_LFS_S3_PREFIX"); v != "" {
 		c.Storage.S3Prefix = v
 	}
-	if v := os.Getenv("ANCHOR_LFS_S3_PRESIGNED_URLS"); v != "" {
-		if b, err := strconv.ParseBool(v); err == nil {
-			c.Storage.S3PresignedURLs = &b
-		}
+	if err := overrideBool("ANCHOR_LFS_S3_PRESIGNED_URLS", &c.Storage.S3PresignedURLs); err != nil {
+		problems = append(problems, err)
 	}
-	if v := os.Getenv("ANCHOR_LFS_S3_FORCE_PATH_STYLE"); v != "" {
-		if b, err := strconv.ParseBool(v); err == nil {
-			c.Storage.S3ForcePathStyle = &b
-		}
+	if err := overrideBool("ANCHOR_LFS_S3_FORCE_PATH_STYLE", &c.Storage.S3ForcePathStyle); err != nil {
+		problems = append(problems, err)
 	}
+
+	return problems
+}
+
+// overrideBool sets *target from the named environment variable when it is set.
+func overrideBool(name string, target **bool) error {
+	v := os.Getenv(name)
+	if v == "" {
+		return nil
+	}
+	b, err := strconv.ParseBool(v)
+	if err != nil {
+		return fmt.Errorf("%s %q must be true or false", name, v)
+	}
+	*target = &b
+	return nil
 }
 
 func (c *Config) parseRateLimitWindow() error {
@@ -335,7 +364,7 @@ func (c *Config) parseSigningKey() error {
 	return nil
 }
 
-func (c *Config) validateStorage() error {
+func (c *Config) validateStorage() []error {
 	backend := strings.ToLower(c.Storage.Backend)
 	c.Storage.Backend = backend
 
@@ -343,32 +372,34 @@ func (c *Config) validateStorage() error {
 	case StorageLocal, "":
 		return nil
 	case StorageS3:
+		var problems []error
 		if c.Storage.S3Bucket == "" {
-			return fmt.Errorf("storage backend %q requires s3_bucket", backend)
+			problems = append(problems, fmt.Errorf("storage backend %q requires s3_bucket", backend))
 		}
 		if c.Storage.S3Region == "" {
-			return fmt.Errorf("storage backend %q requires s3_region", backend)
+			problems = append(problems, fmt.Errorf("storage backend %q requires s3_region", backend))
 		}
 		if c.Storage.S3Endpoint != "" {
 			u, err := url.Parse(c.Storage.S3Endpoint)
 			if err != nil || u.Scheme == "" || u.Host == "" {
-				return fmt.Errorf("s3_endpoint %q is not a valid URL", c.Storage.S3Endpoint)
+				problems = append(problems, fmt.Errorf("s3_endpoint %q is not a valid URL", c.Storage.S3Endpoint))
 			}
 		}
-		return nil
+		return problems
 	default:
-		return fmt.Errorf("unknown storage backend %q (must be %q or %q)", backend, StorageLocal, StorageS3)
+		return []error{fmt.Errorf("unknown storage backend %q (must be %q or %q)", backend, StorageLocal, StorageS3)}
 	}
 }
 
-func (c *Config) validate() error {
-	if err := c.validateStorage(); err != nil {
-		return err
+func (c *Config) validate() []error {
+	problems := c.validateStorage()
+	if c.Options.MaxUploadSize < 0 {
+		problems = append(problems, fmt.Errorf("max_upload_size must be positive"))
 	}
 	if c.Options.BaseURL != "" {
 		u, err := url.Parse(c.Options.BaseURL)
 		if err != nil || u.Scheme == "" || u.Host == "" {
-			return fmt.Errorf("base_url %q is not a valid URL", c.Options.BaseURL)
+			problems = append(problems, fmt.Errorf("base_url %q is not a valid URL", c.Options.BaseURL))
 		}
 	}
 	for _, proxy := range c.Options.TrustedProxies {
@@ -376,62 +407,91 @@ func (c *Config) validate() error {
 			continue
 		}
 		if _, err := netip.ParseAddr(proxy); err != nil {
-			return fmt.Errorf("trusted_proxies entry %q is not an IP address or CIDR range", proxy)
+			problems = append(problems, fmt.Errorf("trusted_proxies entry %q is not an IP address or CIDR range", proxy))
 		}
 	}
 	if len(c.Endpoints) == 0 {
-		return fmt.Errorf("no endpoints configured")
+		return append(problems, fmt.Errorf("no endpoints configured; add an [[endpoints]] block (see config.toml.example)"))
 	}
 
+	paths := make(map[string]struct{}, len(c.Endpoints))
+	dirs := make(map[string]string, len(c.Endpoints))
+	for i := range c.Endpoints {
+		ep := &c.Endpoints[i]
+		label := ep.label(i)
+		if ep.Name == "" {
+			problems = append(problems, fmt.Errorf("%s: missing name", label))
+		}
+		if err := validateEndpointPath(ep.Path, label, paths, dirs); err != nil {
+			problems = append(problems, fmt.Errorf("%s: %w", label, err))
+		}
+		for _, err := range ep.validateAccess() {
+			problems = append(problems, fmt.Errorf("%s: %w", label, err))
+		}
+	}
+	return problems
+}
+
+// validateEndpointPath checks an endpoint path, then records the path and its storage directory as taken by label.
+func validateEndpointPath(endpointPath, label string, paths map[string]struct{}, dirs map[string]string) error {
 	reservedPaths := map[string]struct{}{
 		"health": {},
 	}
-	paths := make(map[string]struct{}, len(c.Endpoints))
-	dirs := make(map[string]string, len(c.Endpoints))
-	for _, ep := range c.Endpoints {
-		if ep.Name == "" {
-			return fmt.Errorf("endpoint missing name")
-		}
-		if ep.Path == "" {
-			return fmt.Errorf("endpoint %q: missing endpoint path", ep.Name)
-		}
-		if !strings.HasPrefix(ep.Path, "/") {
-			return fmt.Errorf("endpoint %q: path %q must start with \"/\"", ep.Name, ep.Path)
-		}
-		if clean := path.Clean(ep.Path); clean != ep.Path {
-			return fmt.Errorf("endpoint %q: path %q is not a clean path; use %q", ep.Name, ep.Path, clean)
-		}
-		if _, exists := paths[ep.Path]; exists {
-			return fmt.Errorf("endpoint %q: duplicate endpoint path %q", ep.Name, ep.Path)
-		}
-		paths[ep.Path] = struct{}{}
-		if _, reserved := reservedPaths[strings.TrimLeft(ep.Path, "/")]; reserved {
-			return fmt.Errorf("endpoint %q: path %q is reserved", ep.Name, ep.Path)
-		}
-		dir := sanitise.Endpoint(ep.Path)
-		if dir == sanitise.InvalidEndpoint {
-			return fmt.Errorf("endpoint %q: path %q contains characters that are unsafe for storage directories", ep.Name, ep.Path)
-		}
-		if other, taken := dirs[strings.ToLower(dir)]; taken {
-			return fmt.Errorf("endpoint %q: path %q uses the same storage directory %q as endpoint %q", ep.Name, ep.Path, dir, other)
-		}
-		dirs[strings.ToLower(dir)] = ep.Name
-		auth := strings.ToLower(ep.Authentication)
-		if auth != authGitHub && auth != "none" {
-			return fmt.Errorf("endpoint %q: unknown authentication %q", ep.Name, ep.Authentication)
-		}
-		if ep.GitHubAPIURL != "" && auth != authGitHub {
-			return fmt.Errorf("endpoint %q: github_api_url is set but authentication is %q (must be \"github\")", ep.Name, auth)
-		}
-		vis := strings.ToLower(ep.Visibility)
-		if vis != "public" && vis != "private" {
-			return fmt.Errorf("endpoint %q: unknown visibility %q", ep.Name, ep.Visibility)
-		}
-		if vis == "private" && auth == "none" {
-			return fmt.Errorf("endpoint %q: visibility \"private\" requires authentication \"github\"; \"none\" lets anyone read and write", ep.Name)
-		}
+	if endpointPath == "" {
+		return fmt.Errorf("missing endpoint path")
 	}
+	if !strings.HasPrefix(endpointPath, "/") {
+		return fmt.Errorf("path %q must start with \"/\"", endpointPath)
+	}
+	if clean := path.Clean(endpointPath); clean != endpointPath {
+		return fmt.Errorf("path %q is not a clean path; use %q", endpointPath, clean)
+	}
+	if _, exists := paths[endpointPath]; exists {
+		return fmt.Errorf("duplicate endpoint path %q", endpointPath)
+	}
+	paths[endpointPath] = struct{}{}
+	if _, reserved := reservedPaths[strings.TrimLeft(endpointPath, "/")]; reserved {
+		return fmt.Errorf("path %q is reserved", endpointPath)
+	}
+	dir := sanitise.Endpoint(endpointPath)
+	if dir == sanitise.InvalidEndpoint {
+		return fmt.Errorf("path %q contains characters that are unsafe for storage directories", endpointPath)
+	}
+	if other, taken := dirs[strings.ToLower(dir)]; taken {
+		return fmt.Errorf("path %q uses the same storage directory %q as %s", endpointPath, dir, other)
+	}
+	dirs[strings.ToLower(dir)] = label
 	return nil
+}
+
+// validateAccess checks the endpoint's authentication and visibility settings.
+func (e *Endpoint) validateAccess() []error {
+	var problems []error
+	if err := checkChoice("authentication", e.Authentication, authGitHub, "none"); err != nil {
+		problems = append(problems, err)
+	}
+	if e.GitHubAPIURL != "" && e.AuthMethod() == "none" {
+		problems = append(problems, fmt.Errorf(`github_api_url is set but authentication is "none" (must be "github")`))
+	}
+	if err := checkChoice("visibility", e.Visibility, "public", "private"); err != nil {
+		problems = append(problems, err)
+	}
+	if strings.EqualFold(e.Visibility, "private") && e.AuthMethod() == "none" {
+		problems = append(problems, fmt.Errorf(`visibility "private" requires authentication "github"; "none" lets anyone read and write`))
+	}
+	return problems
+}
+
+// checkChoice reports a setting that is missing or is not one of the allowed lower-case values.
+func checkChoice(setting, value string, allowed ...string) error {
+	if slices.Contains(allowed, strings.ToLower(value)) {
+		return nil
+	}
+	choices := `"` + strings.Join(allowed, `" or "`) + `"`
+	if value == "" {
+		return fmt.Errorf("missing %s (must be %s)", setting, choices)
+	}
+	return fmt.Errorf("unknown %s %q (must be %s)", setting, value, choices)
 }
 
 func (e *Endpoint) parseGitHubURL() error {
