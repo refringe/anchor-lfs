@@ -244,6 +244,72 @@ authentication = "none"
 	}
 }
 
+func TestLoadLogging(t *testing.T) {
+	tests := []struct {
+		name          string
+		options       string
+		env           map[string]string
+		wantFormat    string
+		wantLevel     string
+		wantAccessLog bool
+	}{
+		{name: "defaults", wantFormat: "json", wantLevel: "info", wantAccessLog: true},
+		{
+			name:       "explicit",
+			options:    "log_format = \"Console\"\nlog_level = \"WARN\"\naccess_log = false",
+			wantFormat: "console", wantLevel: "warn", wantAccessLog: false,
+		},
+		{
+			name:       "deprecated alias",
+			options:    "additional_logging = true",
+			wantFormat: "console", wantLevel: "debug", wantAccessLog: true,
+		},
+		{
+			name:       "deprecated alias with explicit level",
+			options:    "additional_logging = true\nlog_level = \"error\"",
+			wantFormat: "console", wantLevel: "error", wantAccessLog: true,
+		},
+		{
+			name:       "env overrides",
+			options:    "log_format = \"console\"",
+			env:        map[string]string{"ANCHOR_LFS_LOG_FORMAT": "json", "ANCHOR_LFS_LOG_LEVEL": "debug", "ANCHOR_LFS_ACCESS_LOG": "false"},
+			wantFormat: "json", wantLevel: "debug", wantAccessLog: false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			for key, value := range tt.env {
+				t.Setenv(key, value)
+			}
+			path := writeConfig(t, `
+[options]
+`+tt.options+`
+
+[[endpoints]]
+name = "Test"
+url = "https://github.com/org/repo"
+endpoint = "/org/repo"
+visibility = "public"
+authentication = "none"
+`)
+
+			cfg, err := Load(path)
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			if cfg.Options.LogFormat != tt.wantFormat {
+				t.Errorf("LogFormat = %q, want %q", cfg.Options.LogFormat, tt.wantFormat)
+			}
+			if cfg.Options.LogLevel != tt.wantLevel {
+				t.Errorf("LogLevel = %q, want %q", cfg.Options.LogLevel, tt.wantLevel)
+			}
+			if got := cfg.Options.AccessLogEnabled(); got != tt.wantAccessLog {
+				t.Errorf("AccessLogEnabled() = %t, want %t", got, tt.wantAccessLog)
+			}
+		})
+	}
+}
+
 func TestLoadMaxUploadSizeDefault(t *testing.T) {
 	path := writeConfig(t, `
 [[endpoints]]
@@ -373,6 +439,16 @@ func TestLoadProblemMessages(t *testing.T) {
 			want:   `endpoint "Test": unknown authentication "ldap" (must be "github" or "none")`,
 		},
 		{
+			name:   "unknown log_format",
+			config: "[options]\nlog_format = \"text\"\n\n" + endpoint("name = \"Test\"\nvisibility = \"public\"\nauthentication = \"none\"\n"),
+			want:   `unknown log_format "text" (must be "json" or "console")`,
+		},
+		{
+			name:   "unknown log_level",
+			config: "[options]\nlog_level = \"verbose\"\n\n" + endpoint("name = \"Test\"\nvisibility = \"public\"\nauthentication = \"none\"\n"),
+			want:   `unknown log_level "verbose" (must be "debug", "info", "warn" or "error")`,
+		},
+		{
 			name:   "negative max_upload_size",
 			config: "[options]\nmax_upload_size = -1\n\n" + endpoint("name = \"Test\"\nvisibility = \"public\"\nauthentication = \"none\"\n"),
 			want:   "max_upload_size must be positive",
@@ -446,6 +522,8 @@ func TestEnvOverrideInvalidValues(t *testing.T) {
 		{"ANCHOR_LFS_MAX_UPLOAD_SIZE", "-5", `ANCHOR_LFS_MAX_UPLOAD_SIZE "-5" must be a positive number of bytes`},
 		{"ANCHOR_LFS_S3_PRESIGNED_URLS", "yes", `ANCHOR_LFS_S3_PRESIGNED_URLS "yes" must be true or false`},
 		{"ANCHOR_LFS_S3_FORCE_PATH_STYLE", "on", `ANCHOR_LFS_S3_FORCE_PATH_STYLE "on" must be true or false`},
+		{"ANCHOR_LFS_ACCESS_LOG", "off", `ANCHOR_LFS_ACCESS_LOG "off" must be true or false`},
+		{"ANCHOR_LFS_LOG_LEVEL", "trace", `unknown log_level "trace" (must be "debug", "info", "warn" or "error")`},
 	}
 	for _, tt := range tests {
 		t.Run(tt.env+"="+tt.value, func(t *testing.T) {

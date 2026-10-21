@@ -3,8 +3,14 @@
 [options]
 listen_address = ":5420"
 data_directory = "./data"
-additional_logging = false
 #base_url = "https://lfs.example.com"
+
+# Log output: "json" (default) or "console" for human-readable lines, at level "debug", "info" (default), "warn" or
+# "error". Every request is logged at info level (warn for 4xx, error for 5xx, debug for successful health checks);
+# set access_log = false to turn that off.
+log_format = "json"
+log_level = "info"
+#access_log = true
 
 # Peers allowed to set X-Forwarded-For, -Host and -Proto (default: loopback and private ranges). These headers are
 # removed from requests sent by any other peer. Set to [] to trust no one.

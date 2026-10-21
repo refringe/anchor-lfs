@@ -46,11 +46,7 @@ func main() {
 		log.Fatal().Err(err).Msg("failed to load configuration")
 	}
 
-	if cfg.Options.AdditionalLogging {
-		log.Logger = zerolog.New(zerolog.ConsoleWriter{Out: os.Stderr}).
-			With().Timestamp().Logger()
-		zerolog.SetGlobalLevel(zerolog.DebugLevel)
-	}
+	configureLogging(&cfg.Options)
 
 	log.Info().
 		Str("version", version).
@@ -183,8 +179,8 @@ func main() {
 	registerServiceRoutes(mux)
 
 	var handler http.Handler = mux
-	if cfg.Options.AdditionalLogging {
-		handler = middleware.Logging(handler)
+	if cfg.Options.AccessLogEnabled() {
+		handler = middleware.Logging(handler, "/health")
 	}
 	handler = proxyTrust.Handler(handler)
 
@@ -229,6 +225,26 @@ func main() {
 
 	// Zero signing key material in memory.
 	_ = signer.Close()
+}
+
+// configureLogging applies the configured log format and level to the global logger.
+func configureLogging(opts *config.Options) {
+	if opts.LogFormat == config.LogFormatConsole {
+		log.Logger = zerolog.New(zerolog.ConsoleWriter{Out: os.Stderr, NoColor: !isTerminal(os.Stderr)}).
+			With().Timestamp().Logger()
+	}
+	if level, err := zerolog.ParseLevel(opts.LogLevel); err == nil {
+		zerolog.SetGlobalLevel(level)
+	}
+	if opts.AdditionalLogging {
+		log.Warn().Msg(`additional_logging is deprecated; set log_format = "console" and log_level = "debug" instead`)
+	}
+}
+
+// isTerminal reports whether f is a character device such as a terminal.
+func isTerminal(f *os.File) bool {
+	info, err := f.Stat()
+	return err == nil && info.Mode()&os.ModeCharDevice != 0
 }
 
 // registerServiceRoutes adds the health check, the version at the root, and a JSON 404 for every other path to mux.

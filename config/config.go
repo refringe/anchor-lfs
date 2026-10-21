@@ -68,13 +68,24 @@ func (s *Storage) S3ForcePathStyleEnabled() bool {
 	return *s.S3ForcePathStyle
 }
 
+// Log formats.
+const (
+	LogFormatJSON    = "json"
+	LogFormatConsole = "console"
+)
+
 // Options holds global server settings.
 type Options struct {
-	ListenAddress     string `toml:"listen_address"`
-	DataDirectory     string `toml:"data_directory"`
+	ListenAddress string `toml:"listen_address"`
+	DataDirectory string `toml:"data_directory"`
+	BaseURL       string `toml:"base_url"`
+	MaxUploadSize int64  `toml:"max_upload_size"`
+
+	// Logging; AdditionalLogging is a deprecated alias for console format at debug level.
+	LogFormat         string `toml:"log_format"`
+	LogLevel          string `toml:"log_level"`
+	AccessLog         *bool  `toml:"access_log"`
 	AdditionalLogging bool   `toml:"additional_logging"`
-	BaseURL           string `toml:"base_url"`
-	MaxUploadSize     int64  `toml:"max_upload_size"`
 
 	// Peers allowed to set X-Forwarded-For, X-Forwarded-Host and X-Forwarded-Proto.
 	TrustedProxies []string `toml:"trusted_proxies"`
@@ -93,6 +104,14 @@ type Options struct {
 	SigningKeyBytes   []byte        `toml:"-"`
 	URLExpiry         string        `toml:"url_expiry"`
 	URLExpiryDuration time.Duration `toml:"-"`
+}
+
+// AccessLogEnabled returns whether every request is logged, defaulting to true when unset.
+func (o *Options) AccessLogEnabled() bool {
+	if o.AccessLog == nil {
+		return true
+	}
+	return *o.AccessLog
 }
 
 // Endpoint configures a single repository whose LFS objects will be served.
@@ -213,6 +232,18 @@ func (c *Config) applyDefaults() {
 	if c.Options.MaxUploadSize == 0 {
 		c.Options.MaxUploadSize = 5 << 30 // 5 GiB
 	}
+	if c.Options.LogFormat == "" {
+		c.Options.LogFormat = LogFormatJSON
+		if c.Options.AdditionalLogging {
+			c.Options.LogFormat = LogFormatConsole
+		}
+	}
+	if c.Options.LogLevel == "" {
+		c.Options.LogLevel = "info"
+		if c.Options.AdditionalLogging {
+			c.Options.LogLevel = "debug"
+		}
+	}
 	if c.Options.TrustedProxies == nil {
 		c.Options.TrustedProxies = slices.Clone(DefaultTrustedProxies)
 	}
@@ -265,6 +296,15 @@ func (c *Config) applyEnvOverrides() []error {
 		} else {
 			problems = append(problems, fmt.Errorf("ANCHOR_LFS_MAX_UPLOAD_SIZE %q must be a positive number of bytes", v))
 		}
+	}
+	if v := os.Getenv("ANCHOR_LFS_LOG_FORMAT"); v != "" {
+		c.Options.LogFormat = v
+	}
+	if v := os.Getenv("ANCHOR_LFS_LOG_LEVEL"); v != "" {
+		c.Options.LogLevel = v
+	}
+	if err := overrideBool("ANCHOR_LFS_ACCESS_LOG", &c.Options.AccessLog); err != nil {
+		problems = append(problems, err)
 	}
 
 	// Storage overrides.
@@ -393,6 +433,14 @@ func (c *Config) validateStorage() []error {
 
 func (c *Config) validate() []error {
 	problems := c.validateStorage()
+	if err := checkChoice("log_format", c.Options.LogFormat, LogFormatJSON, LogFormatConsole); err != nil {
+		problems = append(problems, err)
+	}
+	if err := checkChoice("log_level", c.Options.LogLevel, "debug", "info", "warn", "error"); err != nil {
+		problems = append(problems, err)
+	}
+	c.Options.LogFormat = strings.ToLower(c.Options.LogFormat)
+	c.Options.LogLevel = strings.ToLower(c.Options.LogLevel)
 	if c.Options.MaxUploadSize < 0 {
 		problems = append(problems, fmt.Errorf("max_upload_size must be positive"))
 	}
@@ -487,7 +535,14 @@ func checkChoice(setting, value string, allowed ...string) error {
 	if slices.Contains(allowed, strings.ToLower(value)) {
 		return nil
 	}
-	choices := `"` + strings.Join(allowed, `" or "`) + `"`
+	quoted := make([]string, len(allowed))
+	for i, choice := range allowed {
+		quoted[i] = strconv.Quote(choice)
+	}
+	choices := quoted[len(quoted)-1]
+	if len(quoted) > 1 {
+		choices = strings.Join(quoted[:len(quoted)-1], ", ") + " or " + choices
+	}
 	if value == "" {
 		return fmt.Errorf("missing %s (must be %s)", setting, choices)
 	}
