@@ -104,6 +104,10 @@ type Options struct {
 	SigningKeyBytes   []byte        `toml:"-"`
 	URLExpiry         string        `toml:"url_expiry"`
 	URLExpiryDuration time.Duration `toml:"-"`
+
+	// Graceful shutdown.
+	ShutdownTimeout         string        `toml:"shutdown_timeout"`
+	ShutdownTimeoutDuration time.Duration `toml:"-"`
 }
 
 // AccessLogEnabled returns whether every request is logged, defaulting to true when unset.
@@ -172,7 +176,8 @@ func Load(path string) (*Config, error) {
 	cfg.applyDefaults()
 
 	problems := cfg.applyEnvOverrides()
-	problems = append(problems, cfg.parseRateLimitWindow(), cfg.parseAuthCacheTTL(), cfg.parseURLExpiry(), cfg.parseSigningKey())
+	problems = append(problems, cfg.parseRateLimitWindow(), cfg.parseAuthCacheTTL(), cfg.parseURLExpiry(), cfg.parseShutdownTimeout(),
+		cfg.parseSigningKey())
 	problems = append(problems, cfg.validate()...)
 	for i := range cfg.Endpoints {
 		if err := cfg.Endpoints[i].parseGitHubURL(); err != nil {
@@ -259,6 +264,9 @@ func (c *Config) applyDefaults() {
 	if c.Options.URLExpiry == "" {
 		c.Options.URLExpiry = "10m"
 	}
+	if c.Options.ShutdownTimeout == "" {
+		c.Options.ShutdownTimeout = "30s"
+	}
 	if c.Storage.Backend == "" {
 		c.Storage.Backend = StorageLocal
 	}
@@ -305,6 +313,9 @@ func (c *Config) applyEnvOverrides() []error {
 	}
 	if err := overrideBool("ANCHOR_LFS_ACCESS_LOG", &c.Options.AccessLog); err != nil {
 		problems = append(problems, err)
+	}
+	if v := os.Getenv("ANCHOR_LFS_SHUTDOWN_TIMEOUT"); v != "" {
+		c.Options.ShutdownTimeout = v
 	}
 
 	// Storage overrides.
@@ -386,6 +397,18 @@ func (c *Config) parseURLExpiry() error {
 		return fmt.Errorf("url_expiry must be positive")
 	}
 	c.Options.URLExpiryDuration = d
+	return nil
+}
+
+func (c *Config) parseShutdownTimeout() error {
+	d, err := time.ParseDuration(c.Options.ShutdownTimeout)
+	if err != nil {
+		return fmt.Errorf("invalid shutdown_timeout %q: %w", c.Options.ShutdownTimeout, err)
+	}
+	if d <= 0 {
+		return fmt.Errorf("shutdown_timeout must be positive")
+	}
+	c.Options.ShutdownTimeoutDuration = d
 	return nil
 }
 

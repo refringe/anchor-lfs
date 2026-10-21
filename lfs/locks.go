@@ -17,6 +17,7 @@ import (
 	"github.com/rs/zerolog/log"
 
 	"github.com/refringe/anchor-lfs/internal/sanitise"
+	"github.com/refringe/anchor-lfs/storage"
 )
 
 // Sentinel errors for lock operations.
@@ -171,7 +172,7 @@ func (s *FileLockStore) saveLocks(endpoint string, locks []Lock) error {
 		return fmt.Errorf("marshalling locks: %w", err)
 	}
 
-	tmp, err := os.CreateTemp(filepath.Dir(path), ".tmp-locks-*")
+	tmp, err := os.CreateTemp(filepath.Dir(path), storage.TempFilePrefix+"locks-*")
 	if err != nil {
 		return fmt.Errorf("creating temp file: %w", err)
 	}

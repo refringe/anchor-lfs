@@ -397,6 +397,9 @@ authentication = "none"
 	if cfg.Options.DataDirectory != "./data" {
 		t.Errorf("default DataDirectory = %q, want %q", cfg.Options.DataDirectory, "./data")
 	}
+	if cfg.Options.ShutdownTimeoutDuration != 30*time.Second {
+		t.Errorf("default ShutdownTimeoutDuration = %v, want %v", cfg.Options.ShutdownTimeoutDuration, 30*time.Second)
+	}
 }
 
 func TestLoadProblemMessages(t *testing.T) {
@@ -452,6 +455,11 @@ func TestLoadProblemMessages(t *testing.T) {
 			name:   "negative max_upload_size",
 			config: "[options]\nmax_upload_size = -1\n\n" + endpoint("name = \"Test\"\nvisibility = \"public\"\nauthentication = \"none\"\n"),
 			want:   "max_upload_size must be positive",
+		},
+		{
+			name:   "zero shutdown_timeout",
+			config: "[options]\nshutdown_timeout = \"0s\"\n\n" + endpoint("name = \"Test\"\nvisibility = \"public\"\nauthentication = \"none\"\n"),
+			want:   "shutdown_timeout must be positive",
 		},
 	}
 	for _, tt := range tests {
@@ -628,6 +636,7 @@ authentication = "none"
 
 	t.Setenv("ANCHOR_LFS_LISTEN", ":9999")
 	t.Setenv("ANCHOR_LFS_DATA_DIR", "/custom/data")
+	t.Setenv("ANCHOR_LFS_SHUTDOWN_TIMEOUT", "2m")
 
 	cfg, err := Load(path)
 	if err != nil {
@@ -639,6 +648,9 @@ authentication = "none"
 	}
 	if cfg.Options.DataDirectory != "/custom/data" {
 		t.Errorf("env override DataDirectory = %q, want %q", cfg.Options.DataDirectory, "/custom/data")
+	}
+	if cfg.Options.ShutdownTimeoutDuration != 2*time.Minute {
+		t.Errorf("env override ShutdownTimeoutDuration = %v, want %v", cfg.Options.ShutdownTimeoutDuration, 2*time.Minute)
 	}
 }
 

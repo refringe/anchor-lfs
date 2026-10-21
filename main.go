@@ -212,14 +212,19 @@ func main() {
 		}
 	}()
 
-	<-done
-	log.Info().Msg("shutting down")
+	sweepCtx, stopSweep := context.WithCancel(context.Background())
+	go sweepTempFiles(sweepCtx, cfg.Options.DataDirectory)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	<-done
+	stopSweep()
+	log.Info().Str("timeout", cfg.Options.ShutdownTimeout).Msg("shutting down")
+
+	ctx, cancel := context.WithTimeout(context.Background(), cfg.Options.ShutdownTimeoutDuration)
 	defer cancel()
 
 	if err := server.Shutdown(ctx); err != nil {
-		log.Error().Err(err).Msg("shutdown error")
+		log.Warn().Err(err).Msg("closing connections still open after shutdown_timeout")
+		_ = server.Close()
 	}
 
 	// Close authenticator background goroutines (e.g., cache sweeper).
@@ -298,6 +303,31 @@ func ensureWritableDir(dir string) error {
 		return fmt.Errorf("data directory %w", err)
 	}
 	return nil
+}
+
+// Temporary files unmodified for tempFileMaxAge are removed at startup and then every tempSweepInterval.
+const (
+	tempFileMaxAge    = time.Hour
+	tempSweepInterval = time.Hour
+)
+
+// sweepTempFiles removes stale temporary files from dataDir now and then every tempSweepInterval until ctx ends.
+func sweepTempFiles(ctx context.Context, dataDir string) {
+	ticker := time.NewTicker(tempSweepInterval)
+	defer ticker.Stop()
+	for {
+		removed, err := storage.RemoveStaleTempFiles(dataDir, tempFileMaxAge)
+		if err != nil {
+			log.Warn().Err(err).Int("removed", removed).Msg("sweeping temporary files")
+		} else if removed > 0 {
+			log.Info().Int("removed", removed).Msg("removed stale temporary files")
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
 }
 
 // signingKeyFile is the name of the auto-generated signing key file within the data directory.

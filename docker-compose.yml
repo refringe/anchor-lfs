@@ -11,3 +11,5 @@ services:
     environment:
       - ANCHOR_LFS_LISTEN=:5420
     restart: unless-stopped
+    # Keep above shutdown_timeout (default 30s).
+    stop_grace_period: 45s

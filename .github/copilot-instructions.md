@@ -65,7 +65,7 @@ The job display names above are the required status check contexts in the reposi
 
 ```
 .                           # Repository root (Go module: github.com/refringe/anchor-lfs)
-├── main.go                 # Entry point: config loading, wiring, route registration, graceful shutdown
+├── main.go                 # Entry point: config loading, wiring, route registration, temp file sweep, graceful shutdown
 ├── main_test.go            # Integration tests for the full server
 ├── readiness.go            # GET /ready checks and the `anchor-lfs healthcheck` subcommand (Docker HEALTHCHECK)
 ├── readiness_test.go
@@ -85,7 +85,9 @@ The job display names above are the required status check contexts in the reposi
 │   ├── local_test.go
 │   ├── s3.go               # S3-compatible storage adapter (S3 proxies, PresignedS3 presigns)
 │   ├── s3_integration_test.go # Runs against a real S3 server when ANCHOR_LFS_TEST_S3_ENDPOINT is set
-│   └── s3_test.go
+│   ├── s3_test.go
+│   ├── tempfiles.go        # TempFilePrefix and RemoveStaleTempFiles (hourly sweep of interrupted writes)
+│   └── tempfiles_test.go
 ├── lfs/
 │   ├── handler.go          # HTTP handlers: Batch, Download, Upload, Verify, Lock CRUD
 │   ├── handler_test.go
