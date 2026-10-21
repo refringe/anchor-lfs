@@ -46,6 +46,7 @@ var (
 
 // s3API is the subset of the S3 client used by the storage adapter, enabling test mocking.
 type s3API interface {
+	HeadBucket(ctx context.Context, params *s3.HeadBucketInput, optFns ...func(*s3.Options)) (*s3.HeadBucketOutput, error)
 	HeadObject(ctx context.Context, params *s3.HeadObjectInput, optFns ...func(*s3.Options)) (*s3.HeadObjectOutput, error)
 	GetObject(ctx context.Context, params *s3.GetObjectInput, optFns ...func(*s3.Options)) (*s3.GetObjectOutput, error)
 	PutObject(ctx context.Context, params *s3.PutObjectInput, optFns ...func(*s3.Options)) (*s3.PutObjectOutput, error)
@@ -293,6 +294,14 @@ func (s *S3) Size(ctx context.Context, endpoint, oid string) (int64, error) {
 		return *resp.ContentLength, nil
 	}
 	return 0, nil
+}
+
+// Check confirms the bucket exists and the configured credentials and region can reach it.
+func (s *S3) Check(ctx context.Context) error {
+	if _, err := s.client.HeadBucket(ctx, &s3.HeadBucketInput{Bucket: aws.String(s.bucket)}); err != nil {
+		return fmt.Errorf("checking S3 bucket %q: %w", s.bucket, err)
+	}
+	return nil
 }
 
 // AvailableSpace returns math.MaxUint64 because S3 buckets have no practical storage limit.

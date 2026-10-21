@@ -24,6 +24,20 @@ var ErrHashMismatch = errors.New("hash mismatch")
 // ErrInsufficientStorage is returned when the filesystem has no space left.
 var ErrInsufficientStorage = errors.New("insufficient storage")
 
+// CheckWritableDir confirms the current process can create files in dir.
+func CheckWritableDir(dir string) error {
+	f, err := os.CreateTemp(dir, ".write-check-*")
+	if err != nil {
+		return fmt.Errorf("%q is not writable: %w", dir, err)
+	}
+	name := f.Name()
+	_ = f.Close()
+	if err := os.Remove(name); err != nil {
+		return fmt.Errorf("removing write check file: %w", err)
+	}
+	return nil
+}
+
 // Local stores objects on the local filesystem.
 type Local struct {
 	basePath string
@@ -32,6 +46,17 @@ type Local struct {
 // NewLocal creates a Local storage adapter rooted at basePath.
 func NewLocal(basePath string) *Local {
 	return &Local{basePath: basePath}
+}
+
+// Check confirms the storage directory accepts new files and its free space can be read.
+func (l *Local) Check(ctx context.Context) error {
+	if err := CheckWritableDir(l.basePath); err != nil {
+		return fmt.Errorf("storage directory %w", err)
+	}
+	if _, err := l.AvailableSpace(ctx); err != nil {
+		return fmt.Errorf("reading free space: %w", err)
+	}
+	return nil
 }
 
 // Exists reports whether the object exists in storage.

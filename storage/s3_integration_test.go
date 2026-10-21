@@ -75,6 +75,18 @@ func randomBytes(n int) []byte {
 	return data
 }
 
+func TestS3IntegrationCheck(t *testing.T) {
+	store := integrationS3Store(t)
+	if err := store.Check(t.Context()); err != nil {
+		t.Fatalf("Check on an existing bucket: %v", err)
+	}
+
+	missing := &S3{client: store.client, bucket: store.bucket + "-missing"}
+	if err := missing.Check(t.Context()); err == nil {
+		t.Fatal("Check on a missing bucket succeeded")
+	}
+}
+
 func TestS3IntegrationPutAndGet(t *testing.T) {
 	for _, tt := range putSizes {
 		t.Run(tt.name, func(t *testing.T) {

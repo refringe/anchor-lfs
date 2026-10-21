@@ -15,6 +15,7 @@ type Adapter interface {
 	Put(ctx context.Context, endpoint, oid string, reader io.Reader, size int64) error
 	Size(ctx context.Context, endpoint, oid string) (int64, error)
 	AvailableSpace(ctx context.Context) (uint64, error)
+	Check(ctx context.Context) error
 }
 
 // PresignedURLProvider is implemented by adapters that hand out direct client-to-storage URLs instead of proxy URLs.

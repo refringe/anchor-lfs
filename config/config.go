@@ -484,6 +484,7 @@ func (c *Config) validate() []error {
 func validateEndpointPath(endpointPath, label string, paths map[string]struct{}, dirs map[string]string) error {
 	reservedPaths := map[string]struct{}{
 		"health": {},
+		"ready":  {},
 	}
 	if endpointPath == "" {
 		return fmt.Errorf("missing endpoint path")

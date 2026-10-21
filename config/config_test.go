@@ -753,18 +753,22 @@ authentication = "none"
 }
 
 func TestLoadReservedEndpointPath(t *testing.T) {
-	path := writeConfig(t, `
+	for _, reserved := range []string{"/health", "/ready"} {
+		t.Run(reserved, func(t *testing.T) {
+			path := writeConfig(t, `
 [[endpoints]]
-name = "Health Collision"
+name = "Collision"
 url = "https://github.com/org/repo"
-endpoint = "/health"
+endpoint = "`+reserved+`"
 visibility = "public"
 authentication = "none"
 `)
 
-	_, err := Load(path)
-	if err == nil {
-		t.Fatal("expected error for reserved endpoint path")
+			_, err := Load(path)
+			if err == nil || !strings.Contains(err.Error(), "is reserved") {
+				t.Fatalf("Load error = %v, want a reserved path error", err)
+			}
+		})
 	}
 }
 

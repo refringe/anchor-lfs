@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -249,5 +250,26 @@ func TestUppercaseOIDResolvesToSameObject(t *testing.T) {
 	}
 	if !exists {
 		t.Fatal("expected object stored under uppercase OID to be found by lowercase OID")
+	}
+}
+
+func TestLocalCheck(t *testing.T) {
+	if err := testStore(t).Check(t.Context()); err != nil {
+		t.Fatalf("Check on a writable directory: %v", err)
+	}
+
+	if runtime.GOOS == "windows" {
+		t.Skip("directory permission bits are not enforced on Windows")
+	}
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses directory permission checks")
+	}
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o500); err != nil { //nolint:gosec // directories need the execute bit to be traversable
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) }) //nolint:gosec // directories need the execute bit to be traversable
+	if err := NewLocal(dir).Check(t.Context()); err == nil || !strings.Contains(err.Error(), "is not writable") {
+		t.Fatalf("Check on a read-only directory = %v, want a not writable error", err)
 	}
 }

@@ -35,6 +35,10 @@ var (
 )
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "healthcheck" {
+		os.Exit(runHealthcheck())
+	}
+
 	// Default: JSON to stderr.
 	log.Logger = zerolog.New(os.Stderr).With().Timestamp().Logger()
 
@@ -83,6 +87,12 @@ func main() {
 	default:
 		store = storage.NewLocal(cfg.Options.DataDirectory)
 		log.Info().Str("path", cfg.Options.DataDirectory).Msg("using local storage backend")
+	}
+	checkCtx, cancelCheck := context.WithTimeout(context.Background(), storageCheckTimeout)
+	err = store.Check(checkCtx)
+	cancelCheck()
+	if err != nil {
+		log.Fatal().Err(err).Msg("checking storage")
 	}
 	lockStore := lfs.NewFileLockStore(cfg.Options.DataDirectory)
 
@@ -176,7 +186,7 @@ func main() {
 			Msg("registered endpoint")
 	}
 
-	registerServiceRoutes(mux)
+	registerServiceRoutes(mux, newReadiness(store, cfg.Options.DataDirectory))
 
 	server := &http.Server{
 		Addr:    cfg.Options.ListenAddress,
@@ -225,7 +235,7 @@ func main() {
 func serverHandler(mux http.Handler, proxyTrust *middleware.ProxyTrust, accessLog bool) http.Handler {
 	handler := mux
 	if accessLog {
-		handler = middleware.Logging(handler, "/health")
+		handler = middleware.Logging(handler, "/health", "/ready")
 	}
 	return proxyTrust.Handler(middleware.RequestID(handler))
 }
@@ -250,15 +260,13 @@ func isTerminal(f *os.File) bool {
 	return err == nil && info.Mode()&os.ModeCharDevice != 0
 }
 
-// registerServiceRoutes adds the health check, the version at the root, and a JSON 404 for every other path to mux.
-func registerServiceRoutes(mux *http.ServeMux) {
+// registerServiceRoutes adds the health and readiness checks, the version at the root, and a JSON 404 for any other path.
+func registerServiceRoutes(mux *http.ServeMux, ready http.Handler) {
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.MarshalWrite(w, map[string]string{
-			"status":  "ok",
-			"version": version,
-		})
+		_ = json.MarshalWrite(w, statusResponse{Status: "ok", Version: version})
 	})
+	mux.Handle("GET /ready", ready)
 	mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.MarshalWrite(w, map[string]string{"version": version})
@@ -286,14 +294,8 @@ func ensureWritableDir(dir string) error {
 	if err := os.MkdirAll(dir, 0o750); err != nil {
 		return fmt.Errorf("creating data directory %q: %w", dir, err)
 	}
-	f, err := os.CreateTemp(dir, ".write-check-*")
-	if err != nil {
-		return fmt.Errorf("data directory %q is not writable: %w", dir, err)
-	}
-	name := f.Name()
-	_ = f.Close()
-	if err := os.Remove(name); err != nil {
-		return fmt.Errorf("removing write check file: %w", err)
+	if err := storage.CheckWritableDir(dir); err != nil {
+		return fmt.Errorf("data directory %w", err)
 	}
 	return nil
 }

@@ -11,6 +11,7 @@ import (
 	"maps"
 	"math"
 	"net/url"
+	"strings"
 	"testing"
 	"time"
 
@@ -28,9 +29,17 @@ type mockS3Client struct {
 	uploads      map[string]map[int32][]byte
 	nextUploadID int
 
-	headErr error
-	getErr  error
-	putErr  error
+	bucketErr error
+	headErr   error
+	getErr    error
+	putErr    error
+}
+
+func (m *mockS3Client) HeadBucket(_ context.Context, _ *s3.HeadBucketInput, _ ...func(*s3.Options)) (*s3.HeadBucketOutput, error) {
+	if m.bucketErr != nil {
+		return nil, m.bucketErr
+	}
+	return &s3.HeadBucketOutput{}, nil
 }
 
 func newMockS3Client() *mockS3Client {
@@ -166,6 +175,19 @@ func testPresignedS3Store(t *testing.T, presigner *mockPresigner) *PresignedS3 {
 	t.Helper()
 	store, _ := testS3Store(t)
 	return &PresignedS3{S3: store, presigner: presigner}
+}
+
+func TestS3Check(t *testing.T) {
+	store, client := testS3Store(t)
+	if err := store.Check(t.Context()); err != nil {
+		t.Fatalf("Check on a reachable bucket: %v", err)
+	}
+
+	client.bucketErr = &s3types.NotFound{Message: aws.String("not found")}
+	err := store.Check(t.Context())
+	if _, ok := errors.AsType[*s3types.NotFound](err); !ok || !strings.Contains(err.Error(), `"test-bucket"`) {
+		t.Fatalf("Check on a missing bucket = %v, want a wrapped NotFound naming the bucket", err)
+	}
 }
 
 func TestS3Exists(t *testing.T) {

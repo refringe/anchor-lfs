@@ -124,7 +124,7 @@ func newIntegrationServer(t *testing.T, rateLimitTokens uint64) (*httptest.Serve
 
 	mux := http.NewServeMux()
 	registerRoutes(mux, ep.Path, handler, rateLimitStore)
-	registerServiceRoutes(mux)
+	registerServiceRoutes(mux, newReadiness(store, dir))
 
 	srv := httptest.NewServer(serverHandler(mux, proxyTrust, true))
 	t.Cleanup(srv.Close)
@@ -360,6 +360,7 @@ func TestIntegrationServiceRoutesAndUnknownPaths(t *testing.T) {
 	}{
 		{http.MethodGet, "/", http.StatusOK, "application/json", "version"},
 		{http.MethodGet, "/health", http.StatusOK, "application/json", "status"},
+		{http.MethodGet, "/ready", http.StatusOK, "application/json", "status"},
 		{http.MethodGet, "/unknown/path", http.StatusNotFound, "application/vnd.git-lfs+json", "message"},
 		{http.MethodPost, "/", http.StatusNotFound, "application/vnd.git-lfs+json", "message"},
 		{http.MethodPost, "/org/wrong-repo/objects/batch", http.StatusNotFound, "application/vnd.git-lfs+json", "message"},

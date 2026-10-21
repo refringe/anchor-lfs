@@ -67,6 +67,8 @@ The job display names above are the required status check contexts in the reposi
 .                           # Repository root (Go module: github.com/refringe/anchor-lfs)
 ├── main.go                 # Entry point: config loading, wiring, route registration, graceful shutdown
 ├── main_test.go            # Integration tests for the full server
+├── readiness.go            # GET /ready checks and the `anchor-lfs healthcheck` subcommand (Docker HEALTHCHECK)
+├── readiness_test.go
 ├── config/
 │   ├── config.go           # TOML parsing, env var overrides (ANCHOR_LFS_*), validation
 │   └── config_test.go
@@ -123,15 +125,16 @@ The job display names above are the required status check contexts in the reposi
 
 All endpoint routes are registered in `registerRoutes` in `main.go` with explicit HTTP methods on `http.ServeMux`. Batch and lock routes are rate limited per IP; the HMAC-signed transfer routes are not. Each endpoint prefix is configurable via `config.toml`:
 
-- `POST {prefix}/objects/batch` — Transfer negotiation
-- `GET {prefix}/objects/{oid}` — Download (HMAC-signed URL)
-- `PUT {prefix}/objects/{oid}` — Upload (HMAC-signed URL)
-- `POST {prefix}/objects/verify` — Integrity verification (HMAC-signed URL)
-- `POST/GET {prefix}/locks` — File locking
-- `POST {prefix}/locks/verify` — Lock ownership verification
-- `POST {prefix}/locks/{id}/unlock` — Unlock
-- `GET /health` — Health check
-- `GET /` — Version; every other path and method gets a JSON 404 (`registerServiceRoutes`)
+- `POST {prefix}/objects/batch`: Transfer negotiation
+- `GET {prefix}/objects/{oid}`: Download (HMAC-signed URL)
+- `PUT {prefix}/objects/{oid}`: Upload (HMAC-signed URL)
+- `POST {prefix}/objects/verify`: Integrity verification (HMAC-signed URL)
+- `POST/GET {prefix}/locks`: File locking
+- `POST {prefix}/locks/verify`: Lock ownership verification
+- `POST {prefix}/locks/{id}/unlock`: Unlock
+- `GET /health`: Liveness check
+- `GET /ready`: Readiness check (data directory and storage backend)
+- `GET /`: Version; every other path and method gets a JSON 404 (`registerServiceRoutes`)
 
 ## Configuration
 
