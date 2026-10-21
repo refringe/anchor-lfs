@@ -3,7 +3,6 @@
 package lfs
 
 import (
-	"context"
 	"encoding/json/v2"
 	"errors"
 	"fmt"
@@ -34,21 +33,6 @@ const maxRequestBodyBytes = 1 << 20 // 1 MB
 // maxObjectsPerBatch caps the number of objects in a single batch request. Each object triggers storage lookups and
 // HMAC signatures, so an explicit bound prevents abuse that the body size limit alone would not catch.
 const maxObjectsPerBatch = 1000
-
-type requestIDKeyType struct{}
-
-var requestIDKey = requestIDKeyType{}
-
-// withRequestID stores a request ID in the context.
-func withRequestID(ctx context.Context, id string) context.Context {
-	return context.WithValue(ctx, requestIDKey, id)
-}
-
-// getRequestID retrieves the request ID from the context.
-func getRequestID(ctx context.Context) string {
-	id, _ := ctx.Value(requestIDKey).(string)
-	return id
-}
 
 const lfsMediaType = "application/vnd.git-lfs+json"
 
@@ -102,17 +86,8 @@ func NewHandler(cfg HandlerConfig) *Handler {
 	}
 }
 
-// assignRequestID generates a request ID, stores it in the request context,
-// and sets the X-Request-ID response header.
-func assignRequestID(w http.ResponseWriter, r *http.Request) *http.Request {
-	id := middleware.GenerateRequestID()
-	w.Header().Set("X-Request-ID", id)
-	return r.WithContext(withRequestID(r.Context(), id))
-}
-
 // BatchHandler handles POST /objects/batch requests.
 func (h *Handler) BatchHandler(w http.ResponseWriter, r *http.Request) {
-	r = assignRequestID(w, r)
 	// Validate Accept header per spec — clients must send the LFS media type.
 	accept, _, _ := mime.ParseMediaType(r.Header.Get("Accept"))
 	if accept != lfsMediaType {
@@ -186,7 +161,7 @@ func (h *Handler) BatchHandler(w http.ResponseWriter, r *http.Request) {
 		if totalSize > 0 {
 			avail, err := h.store.AvailableSpace(r.Context())
 			if err != nil {
-				log.Warn().Err(err).Msg("checking available storage space")
+				middleware.Logger(r.Context()).Warn().Err(err).Msg("checking available storage space")
 				// Fail open — if we can't check, let individual uploads handle it.
 			} else if totalSize > avail {
 				writeError(w, r, http.StatusInsufficientStorage, "insufficient storage for requested uploads")
@@ -206,7 +181,6 @@ func (h *Handler) BatchHandler(w http.ResponseWriter, r *http.Request) {
 // The HMAC-signed URL already proves the batch handler authenticated and authorized this request. The batch response
 // sets "authenticated": true, which tells the Git LFS client not to resend credentials on transfer requests.
 func (h *Handler) DownloadHandler(w http.ResponseWriter, r *http.Request) {
-	r = assignRequestID(w, r)
 	if !h.requireValidSignature(w, r) {
 		return
 	}
@@ -222,7 +196,7 @@ func (h *Handler) DownloadHandler(w http.ResponseWriter, r *http.Request) {
 		if errors.Is(err, fs.ErrNotExist) {
 			writeError(w, r, http.StatusNotFound, "object not found")
 		} else {
-			log.Error().Err(err).Str("oid", oid).Msg("reading object")
+			middleware.Logger(r.Context()).Error().Err(err).Str("oid", oid).Msg("reading object")
 			writeError(w, r, http.StatusInternalServerError, msgInternalError)
 		}
 		return
@@ -244,7 +218,7 @@ func (h *Handler) DownloadHandler(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Length", strconv.FormatInt(size, 10))
 	if _, err := io.Copy(w, reader); err != nil {
-		log.Error().Err(err).Str("oid", oid).Msg("writing download response")
+		middleware.Logger(r.Context()).Error().Err(err).Str("oid", oid).Msg("writing download response")
 	}
 }
 
@@ -253,7 +227,6 @@ func (h *Handler) DownloadHandler(w http.ResponseWriter, r *http.Request) {
 // The HMAC-signed URL already proves the batch handler authenticated and authorized this request. The batch response
 // sets "authenticated": true, which tells the Git LFS client not to resend credentials on transfer requests.
 func (h *Handler) UploadHandler(w http.ResponseWriter, r *http.Request) {
-	r = assignRequestID(w, r)
 	if !h.requireValidSignature(w, r) {
 		return
 	}
@@ -276,7 +249,7 @@ func (h *Handler) UploadHandler(w http.ResponseWriter, r *http.Request) {
 
 	exists, err := h.store.Exists(r.Context(), h.endpoint.Path, oid)
 	if err != nil {
-		log.Error().Err(err).Str("oid", oid).Msg("checking object existence")
+		middleware.Logger(r.Context()).Error().Err(err).Str("oid", oid).Msg("checking object existence")
 		writeError(w, r, http.StatusInternalServerError, msgInternalError)
 		return
 	}
@@ -297,12 +270,12 @@ func (h *Handler) UploadHandler(w http.ResponseWriter, r *http.Request) {
 			writeError(w, r, http.StatusInsufficientStorage, "insufficient storage")
 			return
 		}
-		log.Error().Err(err).Str("oid", oid).Msg("storing object")
+		middleware.Logger(r.Context()).Error().Err(err).Str("oid", oid).Msg("storing object")
 		writeError(w, r, http.StatusInternalServerError, msgInternalError)
 		return
 	}
 
-	log.Info().
+	middleware.Logger(r.Context()).Info().
 		Str("endpoint", h.endpoint.Name).
 		Str("oid", oid).
 		Int64("size", r.ContentLength).
@@ -313,7 +286,6 @@ func (h *Handler) UploadHandler(w http.ResponseWriter, r *http.Request) {
 
 // VerifyHandler handles POST /objects/verify requests.
 func (h *Handler) VerifyHandler(w http.ResponseWriter, r *http.Request) {
-	r = assignRequestID(w, r)
 	if !h.requireValidSignature(w, r) {
 		return
 	}
@@ -343,7 +315,7 @@ func (h *Handler) VerifyHandler(w http.ResponseWriter, r *http.Request) {
 		if errors.Is(err, fs.ErrNotExist) {
 			writeError(w, r, http.StatusNotFound, "object not found")
 		} else {
-			log.Error().Err(err).Str("oid", req.OID).Msg("checking object size")
+			middleware.Logger(r.Context()).Error().Err(err).Str("oid", req.OID).Msg("checking object size")
 			writeError(w, r, http.StatusInternalServerError, msgInternalError)
 		}
 		return
@@ -359,7 +331,6 @@ func (h *Handler) VerifyHandler(w http.ResponseWriter, r *http.Request) {
 
 // CreateLockHandler handles POST /{endpoint}/locks requests.
 func (h *Handler) CreateLockHandler(w http.ResponseWriter, r *http.Request) {
-	r = assignRequestID(w, r)
 	if !requireLFSMediaType(w, r) {
 		return
 	}
@@ -387,12 +358,12 @@ func (h *Handler) CreateLockHandler(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusConflict, CreateLockResponse{
 				Lock:             lock,
 				Message:          "already created lock",
-				RequestID:        getRequestID(r.Context()),
+				RequestID:        middleware.RequestIDFrom(r.Context()),
 				DocumentationURL: documentationURL,
 			})
 			return
 		}
-		log.Error().Err(err).Str("endpoint", h.endpoint.Name).Msg("creating lock")
+		middleware.Logger(r.Context()).Error().Err(err).Str("endpoint", h.endpoint.Name).Msg("creating lock")
 		writeError(w, r, http.StatusInternalServerError, msgInternalError)
 		return
 	}
@@ -403,8 +374,6 @@ func (h *Handler) CreateLockHandler(w http.ResponseWriter, r *http.Request) {
 // ListLocksHandler handles GET /{endpoint}/locks requests.
 // Only Accept is validated (not Content-Type) because GET requests have no body.
 func (h *Handler) ListLocksHandler(w http.ResponseWriter, r *http.Request) {
-	r = assignRequestID(w, r)
-
 	accept, _, _ := mime.ParseMediaType(r.Header.Get("Accept"))
 	if accept != lfsMediaType {
 		writeError(w, r, http.StatusNotAcceptable, "expected Accept: "+lfsMediaType)
@@ -434,7 +403,7 @@ func (h *Handler) ListLocksHandler(w http.ResponseWriter, r *http.Request) {
 		Limit:   limit,
 	})
 	if err != nil {
-		log.Error().Err(err).Str("endpoint", h.endpoint.Name).Msg("listing locks")
+		middleware.Logger(r.Context()).Error().Err(err).Str("endpoint", h.endpoint.Name).Msg("listing locks")
 		writeError(w, r, http.StatusInternalServerError, msgInternalError)
 		return
 	}
@@ -444,7 +413,6 @@ func (h *Handler) ListLocksHandler(w http.ResponseWriter, r *http.Request) {
 
 // VerifyLocksHandler handles POST /{endpoint}/locks/verify requests.
 func (h *Handler) VerifyLocksHandler(w http.ResponseWriter, r *http.Request) {
-	r = assignRequestID(w, r)
 	if !requireLFSMediaType(w, r) {
 		return
 	}
@@ -467,7 +435,7 @@ func (h *Handler) VerifyLocksHandler(w http.ResponseWriter, r *http.Request) {
 		Limit:  req.Limit,
 	})
 	if err != nil {
-		log.Error().Err(err).Str("endpoint", h.endpoint.Name).Msg("verifying locks")
+		middleware.Logger(r.Context()).Error().Err(err).Str("endpoint", h.endpoint.Name).Msg("verifying locks")
 		writeError(w, r, http.StatusInternalServerError, msgInternalError)
 		return
 	}
@@ -491,7 +459,6 @@ func (h *Handler) VerifyLocksHandler(w http.ResponseWriter, r *http.Request) {
 
 // UnlockHandler handles POST /{endpoint}/locks/{id}/unlock requests.
 func (h *Handler) UnlockHandler(w http.ResponseWriter, r *http.Request) {
-	r = assignRequestID(w, r)
 	if !requireLFSMediaType(w, r) {
 		return
 	}
@@ -525,7 +492,7 @@ func (h *Handler) UnlockHandler(w http.ResponseWriter, r *http.Request) {
 			writeError(w, r, http.StatusForbidden, "lock is owned by another user")
 			return
 		}
-		log.Error().Err(err).Str("endpoint", h.endpoint.Name).Msg("unlocking")
+		middleware.Logger(r.Context()).Error().Err(err).Str("endpoint", h.endpoint.Name).Msg("unlocking")
 		writeError(w, r, http.StatusInternalServerError, msgInternalError)
 		return
 	}
@@ -555,18 +522,18 @@ func (h *Handler) requireAuth(w http.ResponseWriter, r *http.Request, op auth.Op
 func (h *Handler) requireAuthResult(w http.ResponseWriter, r *http.Request, op auth.Operation) (auth.Result, bool) {
 	result, err := h.authenticate(r, op)
 	if rateErr, ok := errors.AsType[*auth.RateLimitedError](err); ok {
-		log.Warn().Err(err).Str("endpoint", h.endpoint.Name).Msg("authentication rate limited")
+		middleware.Logger(r.Context()).Warn().Err(err).Str("endpoint", h.endpoint.Name).Msg("authentication rate limited")
 		w.Header().Set("Retry-After", strconv.Itoa(max(1, int(math.Ceil(rateErr.RetryAfter.Seconds())))))
 		writeError(w, r, http.StatusTooManyRequests, "authentication service rate limit exceeded")
 		return auth.Result{}, false
 	}
 	if errors.Is(err, auth.ErrUnavailable) {
-		log.Warn().Err(err).Str("endpoint", h.endpoint.Name).Msg("authentication service unavailable")
+		middleware.Logger(r.Context()).Warn().Err(err).Str("endpoint", h.endpoint.Name).Msg("authentication service unavailable")
 		writeError(w, r, http.StatusBadGateway, "authentication service unavailable")
 		return auth.Result{}, false
 	}
 	if err != nil {
-		log.Error().Err(err).Str("endpoint", h.endpoint.Name).Msg("authentication error")
+		middleware.Logger(r.Context()).Error().Err(err).Str("endpoint", h.endpoint.Name).Msg("authentication error")
 		writeError(w, r, http.StatusInternalServerError, msgInternalError)
 		return auth.Result{}, false
 	}
@@ -680,14 +647,13 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 
 // NotFoundHandler answers requests for paths with no Git LFS route with a JSON 404.
 func NotFoundHandler(w http.ResponseWriter, r *http.Request) {
-	r = assignRequestID(w, r)
 	writeError(w, r, http.StatusNotFound, "no Git LFS endpoint at this path")
 }
 
 func writeError(w http.ResponseWriter, r *http.Request, status int, message string) {
 	resp := ErrorResponse{
 		Message:          message,
-		RequestID:        getRequestID(r.Context()),
+		RequestID:        middleware.RequestIDFrom(r.Context()),
 		DocumentationURL: documentationURL,
 	}
 	writeJSON(w, status, resp)

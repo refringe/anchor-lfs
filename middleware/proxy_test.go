@@ -44,20 +44,29 @@ func TestProxyTrustHandler(t *testing.T) {
 				req.Header.Set("X-Forwarded-For", tt.forwarded)
 				req.Header.Set("X-Forwarded-Host", "lfs.example.com")
 				req.Header.Set("X-Forwarded-Proto", "https")
+				req.Header.Set(RequestIDHeader, "proxy-request-id")
 			}
 
 			var gotIP string
-			var gotHeaders bool
+			var kept []string
 			pt.Handler(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
 				gotIP = ClientIP(r)
-				gotHeaders = r.Header.Get("X-Forwarded-Host") != "" || r.Header.Get("X-Forwarded-Proto") != ""
+				for _, name := range []string{"X-Forwarded-Host", "X-Forwarded-Proto", RequestIDHeader} {
+					if r.Header.Get(name) != "" {
+						kept = append(kept, name)
+					}
+				}
 			})).ServeHTTP(httptest.NewRecorder(), req)
 
 			if gotIP != tt.wantIP {
 				t.Errorf("ClientIP = %q, want %q", gotIP, tt.wantIP)
 			}
-			if tt.forwarded != "" && gotHeaders != tt.wantHeaders {
-				t.Errorf("forwarded headers kept = %t, want %t", gotHeaders, tt.wantHeaders)
+			wantKept := 0
+			if tt.wantHeaders {
+				wantKept = 3
+			}
+			if tt.forwarded != "" && len(kept) != wantKept {
+				t.Errorf("proxy headers kept = %q, want %d of them", kept, wantKept)
 			}
 		})
 	}

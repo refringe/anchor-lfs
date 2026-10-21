@@ -16,6 +16,7 @@ import (
 	"github.com/refringe/anchor-lfs/auth"
 	"github.com/refringe/anchor-lfs/config"
 	"github.com/refringe/anchor-lfs/internal/testutil"
+	"github.com/refringe/anchor-lfs/middleware"
 	"github.com/refringe/anchor-lfs/storage"
 )
 
@@ -816,7 +817,7 @@ func TestErrorResponseIncludesRequestID(t *testing.T) {
 	req.Header.Set("Accept", lfsMediaType)
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
-	h.BatchHandler(w, req)
+	middleware.RequestID(http.HandlerFunc(h.BatchHandler)).ServeHTTP(w, req)
 
 	rid := w.Header().Get("X-Request-ID")
 	if rid == "" {

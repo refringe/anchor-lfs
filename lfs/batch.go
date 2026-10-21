@@ -6,8 +6,7 @@ import (
 	"io/fs"
 	"net/http"
 
-	"github.com/rs/zerolog/log"
-
+	"github.com/refringe/anchor-lfs/middleware"
 	"github.com/refringe/anchor-lfs/storage"
 )
 
@@ -53,7 +52,7 @@ func (h *Handler) processDownload(r *http.Request, obj Object, baseURL string) O
 		if errors.Is(err, fs.ErrNotExist) {
 			resp.Error = &ObjectError{Code: 404, Message: "object not found"}
 		} else {
-			log.Error().Err(err).Str("oid", obj.OID).Msg("reading object size")
+			middleware.Logger(r.Context()).Error().Err(err).Str("oid", obj.OID).Msg("reading object size")
 			resp.Error = &ObjectError{Code: 500, Message: msgInternalError}
 		}
 		return resp
@@ -71,7 +70,7 @@ func (h *Handler) processDownload(r *http.Request, obj Object, baseURL string) O
 	if p, ok := h.store.(storage.PresignedURLProvider); ok {
 		href, err := p.PresignGet(r.Context(), h.endpoint.Path, obj.OID, h.signer.Expiry())
 		if err != nil {
-			log.Error().Err(err).Str("oid", obj.OID).Msg("presigning download URL")
+			middleware.Logger(r.Context()).Error().Err(err).Str("oid", obj.OID).Msg("presigning download URL")
 			resp.Error = &ObjectError{Code: 500, Message: msgInternalError}
 			return resp
 		}
@@ -111,7 +110,7 @@ func (h *Handler) processUpload(r *http.Request, obj Object, baseURL string) Obj
 	// If the object already exists, omit actions to signal the server has it.
 	exists, err := h.store.Exists(r.Context(), h.endpoint.Path, obj.OID)
 	if err != nil {
-		log.Error().Err(err).Str("oid", obj.OID).Msg("checking object existence")
+		middleware.Logger(r.Context()).Error().Err(err).Str("oid", obj.OID).Msg("checking object existence")
 		resp.Error = &ObjectError{Code: 500, Message: msgInternalError}
 		return resp
 	}
@@ -128,7 +127,7 @@ func (h *Handler) processUpload(r *http.Request, obj Object, baseURL string) Obj
 			return resp
 		}
 		if err != nil {
-			log.Error().Err(err).Str("oid", obj.OID).Msg("presigning upload URL")
+			middleware.Logger(r.Context()).Error().Err(err).Str("oid", obj.OID).Msg("presigning upload URL")
 			resp.Error = &ObjectError{Code: 500, Message: msgInternalError}
 			return resp
 		}

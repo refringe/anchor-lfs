@@ -26,6 +26,7 @@ import (
 	"github.com/refringe/anchor-lfs/config"
 	"github.com/refringe/anchor-lfs/internal/testutil"
 	"github.com/refringe/anchor-lfs/lfs"
+	"github.com/refringe/anchor-lfs/middleware"
 	"github.com/refringe/anchor-lfs/storage"
 )
 
@@ -116,11 +117,16 @@ func newIntegrationServer(t *testing.T, rateLimitTokens uint64) (*httptest.Serve
 	}
 	t.Cleanup(func() { _ = rateLimitStore.Close(context.Background()) })
 
+	proxyTrust, err := middleware.NewProxyTrust(config.DefaultTrustedProxies)
+	if err != nil {
+		t.Fatalf("NewProxyTrust: %v", err)
+	}
+
 	mux := http.NewServeMux()
 	registerRoutes(mux, ep.Path, handler, rateLimitStore)
 	registerServiceRoutes(mux)
 
-	srv := httptest.NewServer(mux)
+	srv := httptest.NewServer(serverHandler(mux, proxyTrust, true))
 	t.Cleanup(srv.Close)
 	return srv, store
 }
@@ -386,6 +392,62 @@ func TestIntegrationServiceRoutesAndUnknownPaths(t *testing.T) {
 			}
 			if _, ok := body[tt.wantKey]; !ok {
 				t.Errorf("body %v has no %q field", body, tt.wantKey)
+			}
+		})
+	}
+}
+
+func TestIntegrationRequestIDs(t *testing.T) {
+	srv, _ := newIntegrationServer(t, 1)
+	batchBody, _ := json.Marshal(lfs.BatchRequest{Operation: "download", Objects: []lfs.Object{}})
+	tests := []struct {
+		name       string
+		method     string
+		path       string
+		body       []byte
+		incoming   string
+		wantStatus int
+	}{
+		{name: "error with incoming ID", method: http.MethodGet, path: "/unknown", incoming: "proxy-trace-1", wantStatus: http.StatusNotFound},
+		{name: "error with generated ID", method: http.MethodGet, path: "/unknown", wantStatus: http.StatusNotFound},
+		{name: "first batch", method: http.MethodPost, path: "/org/repo/objects/batch", body: batchBody, wantStatus: http.StatusOK},
+		{name: "rate limited batch", method: http.MethodPost, path: "/org/repo/objects/batch", body: batchBody, wantStatus: http.StatusTooManyRequests},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req, err := http.NewRequestWithContext(t.Context(), tt.method, srv.URL+tt.path, bytes.NewReader(tt.body))
+			if err != nil {
+				t.Fatalf("creating request: %v", err)
+			}
+			req.Header.Set("Accept", "application/vnd.git-lfs+json")
+			req.Header.Set("Content-Type", "application/vnd.git-lfs+json")
+			if tt.incoming != "" {
+				req.Header.Set(middleware.RequestIDHeader, tt.incoming)
+			}
+			resp, err := srv.Client().Do(req)
+			if err != nil {
+				t.Fatalf("request: %v", err)
+			}
+			defer func() { _ = resp.Body.Close() }()
+
+			if resp.StatusCode != tt.wantStatus {
+				t.Fatalf("status = %d, want %d", resp.StatusCode, tt.wantStatus)
+			}
+			id := resp.Header.Get(middleware.RequestIDHeader)
+			if id == "" || (tt.incoming != "" && id != tt.incoming) {
+				t.Errorf("X-Request-ID = %q, want %q or a generated ID", id, tt.incoming)
+			}
+			if tt.wantStatus < http.StatusBadRequest {
+				return
+			}
+			var body struct {
+				RequestID string `json:"request_id"`
+			}
+			if err := json.UnmarshalRead(resp.Body, &body); err != nil {
+				t.Fatalf("decoding body: %v", err)
+			}
+			if body.RequestID != id {
+				t.Errorf("body request_id = %q, want header value %q", body.RequestID, id)
 			}
 		})
 	}

@@ -6,7 +6,6 @@ import (
 
 	"github.com/felixge/httpsnoop"
 	"github.com/rs/zerolog"
-	"github.com/rs/zerolog/log"
 )
 
 // Logging logs every request, at debug level for successful requests to quietPaths and by status otherwise.
@@ -14,7 +13,7 @@ func Logging(next http.Handler, quietPaths ...string) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		m := httpsnoop.CaptureMetrics(next, w, r)
 
-		event := logEventForStatus(m.Code, slices.Contains(quietPaths, r.URL.Path))
+		event := logEventForStatus(Logger(r.Context()), m.Code, slices.Contains(quietPaths, r.URL.Path))
 		event.
 			Str("method", r.Method).
 			Str("path", r.URL.Path).
@@ -26,15 +25,15 @@ func Logging(next http.Handler, quietPaths ...string) http.Handler {
 	})
 }
 
-func logEventForStatus(status int, quiet bool) *zerolog.Event {
+func logEventForStatus(logger *zerolog.Logger, status int, quiet bool) *zerolog.Event {
 	switch {
 	case status >= 500:
-		return log.Error()
+		return logger.Error()
 	case status >= 400:
-		return log.Warn()
+		return logger.Warn()
 	case quiet:
-		return log.Debug()
+		return logger.Debug()
 	default:
-		return log.Info()
+		return logger.Info()
 	}
 }

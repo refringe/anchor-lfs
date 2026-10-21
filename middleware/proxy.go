@@ -10,13 +10,13 @@ import (
 	"github.com/realclientip/realclientip-go"
 )
 
-// forwardedHeaders are the request headers honoured only when a trusted proxy sent them.
-var forwardedHeaders = []string{"X-Forwarded-For", "X-Forwarded-Host", "X-Forwarded-Proto"}
+// proxyHeaders are the request headers honoured only when a trusted proxy sent them.
+var proxyHeaders = []string{"X-Forwarded-For", "X-Forwarded-Host", "X-Forwarded-Proto", RequestIDHeader}
 
 // clientIPKey is the request context key under which ProxyTrust.Handler records the client IP.
 type clientIPKey struct{}
 
-// ProxyTrust resolves each request's client IP, honouring X-Forwarded-* headers only from trusted proxy peers.
+// ProxyTrust resolves each request's client IP, honouring proxy headers only from trusted proxy peers.
 type ProxyTrust struct {
 	trusted  []net.IPNet
 	strategy realclientip.RightmostTrustedRangeStrategy
@@ -35,7 +35,7 @@ func NewProxyTrust(proxies []string) (*ProxyTrust, error) {
 	return &ProxyTrust{trusted: trusted, strategy: strategy}, nil
 }
 
-// Handler removes forwarded headers sent by untrusted peers and records the client IP for ClientIP.
+// Handler removes proxy headers sent by untrusted peers and records the client IP for ClientIP.
 func (p *ProxyTrust) Handler(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ip := peerIP(r)
@@ -44,7 +44,7 @@ func (p *ProxyTrust) Handler(next http.Handler) http.Handler {
 				ip = forwarded
 			}
 		} else {
-			for _, name := range forwardedHeaders {
+			for _, name := range proxyHeaders {
 				r.Header.Del(name)
 			}
 		}

@@ -54,7 +54,7 @@ The job display names above are the required status check contexts in the reposi
 **Other conventions:**
 - Table-driven tests with `t.Helper()` on helpers
 - Error wrapping: `fmt.Errorf("context: %w", err)`
-- Structured logging via `zerolog` (use `log` from `github.com/rs/zerolog/log`)
+- Structured logging via `zerolog` (use `log` from `github.com/rs/zerolog/log`, or `middleware.Logger(r.Context())` in request paths so lines carry `request_id`)
 - Interface-based adapters with compile-time checks: `var _ Interface = (*Impl)(nil)`
 - Dependency injection via config structs (e.g., `HandlerConfig`)
 - OID validation belongs in the storage package (`storage.IsValidOID` regexp guard, `storage.ErrInvalidOID`); handlers call it first for 422 responses, and the adapters validate again before touching a path or key
@@ -98,6 +98,8 @@ The job display names above are the required status check contexts in the reposi
 ├── middleware/
 │   ├── proxy.go            # Trusted-proxy handling: strips untrusted X-Forwarded-* headers, resolves client IPs
 │   ├── proxy_test.go
+│   ├── requestid.go        # Request IDs (X-Request-ID header, context, request-scoped logger)
+│   ├── requestid_test.go
 │   ├── ratelimit.go        # Per-IP rate limiting middleware
 │   ├── ratelimit_test.go
 │   ├── logging.go          # Structured request logging middleware

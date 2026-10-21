@@ -13,13 +13,14 @@ import (
 )
 
 type accessLogEntry struct {
-	Level   string `json:"level"`
-	Message string `json:"message"`
-	Method  string `json:"method"`
-	Path    string `json:"path"`
-	Status  int    `json:"status"`
-	Bytes   int64  `json:"bytes"`
-	IP      string `json:"ip"`
+	Level     string `json:"level"`
+	Message   string `json:"message"`
+	Method    string `json:"method"`
+	Path      string `json:"path"`
+	Status    int    `json:"status"`
+	Bytes     int64  `json:"bytes"`
+	IP        string `json:"ip"`
+	RequestID string `json:"request_id"`
 }
 
 // captureLog sends the global logger's output to a buffer until the test ends.
@@ -55,7 +56,7 @@ func TestLoggingMiddleware(t *testing.T) {
 			req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, tt.path, nil)
 			req.RemoteAddr = "1.2.3.4:1234"
 			w := httptest.NewRecorder()
-			Logging(inner, "/health").ServeHTTP(w, req)
+			RequestID(Logging(inner, "/health")).ServeHTTP(w, req)
 
 			if w.Code != tt.status || w.Body.String() != "ok" {
 				t.Fatalf("response = %d %q, want %d %q", w.Code, w.Body.String(), tt.status, "ok")
@@ -65,13 +66,14 @@ func TestLoggingMiddleware(t *testing.T) {
 				t.Fatalf("decoding log line %q: %v", buf.String(), err)
 			}
 			want := accessLogEntry{
-				Level:   tt.wantLevel,
-				Message: "request",
-				Method:  http.MethodPost,
-				Path:    tt.path,
-				Status:  tt.status,
-				Bytes:   2,
-				IP:      "1.2.3.4",
+				Level:     tt.wantLevel,
+				Message:   "request",
+				Method:    http.MethodPost,
+				Path:      tt.path,
+				Status:    tt.status,
+				Bytes:     2,
+				IP:        "1.2.3.4",
+				RequestID: w.Header().Get(RequestIDHeader),
 			}
 			if got != want {
 				t.Errorf("log entry = %+v, want %+v", got, want)

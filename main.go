@@ -178,15 +178,9 @@ func main() {
 
 	registerServiceRoutes(mux)
 
-	var handler http.Handler = mux
-	if cfg.Options.AccessLogEnabled() {
-		handler = middleware.Logging(handler, "/health")
-	}
-	handler = proxyTrust.Handler(handler)
-
 	server := &http.Server{
 		Addr:    cfg.Options.ListenAddress,
-		Handler: handler,
+		Handler: serverHandler(mux, proxyTrust, cfg.Options.AccessLogEnabled()),
 
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       120 * time.Second,
@@ -225,6 +219,15 @@ func main() {
 
 	// Zero signing key material in memory.
 	_ = signer.Close()
+}
+
+// serverHandler wraps mux with proxy trust, request IDs and, when accessLog is set, the access log.
+func serverHandler(mux http.Handler, proxyTrust *middleware.ProxyTrust, accessLog bool) http.Handler {
+	handler := mux
+	if accessLog {
+		handler = middleware.Logging(handler, "/health")
+	}
+	return proxyTrust.Handler(middleware.RequestID(handler))
 }
 
 // configureLogging applies the configured log format and level to the global logger.
