@@ -81,6 +81,10 @@ type Options struct {
 	BaseURL       string `toml:"base_url"`
 	MaxUploadSize int64  `toml:"max_upload_size"`
 
+	// Longest wait for more upload body data before the upload is abandoned; zero disables it.
+	UploadIdleTimeout         string        `toml:"upload_idle_timeout"`
+	UploadIdleTimeoutDuration time.Duration `toml:"-"`
+
 	// Logging; AdditionalLogging is a deprecated alias for console format at debug level.
 	LogFormat         string `toml:"log_format"`
 	LogLevel          string `toml:"log_level"`
@@ -177,7 +181,7 @@ func Load(path string) (*Config, error) {
 
 	problems := cfg.applyEnvOverrides()
 	problems = append(problems, cfg.parseRateLimitWindow(), cfg.parseAuthCacheTTL(), cfg.parseURLExpiry(), cfg.parseShutdownTimeout(),
-		cfg.parseSigningKey())
+		cfg.parseUploadIdleTimeout(), cfg.parseSigningKey())
 	problems = append(problems, cfg.validate()...)
 	for i := range cfg.Endpoints {
 		if err := cfg.Endpoints[i].parseGitHubURL(); err != nil {
@@ -236,6 +240,9 @@ func (c *Config) applyDefaults() {
 	}
 	if c.Options.MaxUploadSize == 0 {
 		c.Options.MaxUploadSize = 5 << 30 // 5 GiB
+	}
+	if c.Options.UploadIdleTimeout == "" {
+		c.Options.UploadIdleTimeout = "60s"
 	}
 	if c.Options.LogFormat == "" {
 		c.Options.LogFormat = LogFormatJSON
@@ -304,6 +311,9 @@ func (c *Config) applyEnvOverrides() []error {
 		} else {
 			problems = append(problems, fmt.Errorf("ANCHOR_LFS_MAX_UPLOAD_SIZE %q must be a positive number of bytes", v))
 		}
+	}
+	if v := os.Getenv("ANCHOR_LFS_UPLOAD_IDLE_TIMEOUT"); v != "" {
+		c.Options.UploadIdleTimeout = v
 	}
 	if v := os.Getenv("ANCHOR_LFS_LOG_FORMAT"); v != "" {
 		c.Options.LogFormat = v
@@ -409,6 +419,18 @@ func (c *Config) parseShutdownTimeout() error {
 		return fmt.Errorf("shutdown_timeout must be positive")
 	}
 	c.Options.ShutdownTimeoutDuration = d
+	return nil
+}
+
+func (c *Config) parseUploadIdleTimeout() error {
+	d, err := time.ParseDuration(c.Options.UploadIdleTimeout)
+	if err != nil {
+		return fmt.Errorf("invalid upload_idle_timeout %q: %w", c.Options.UploadIdleTimeout, err)
+	}
+	if d < 0 {
+		return fmt.Errorf("upload_idle_timeout must not be negative")
+	}
+	c.Options.UploadIdleTimeoutDuration = d
 	return nil
 }
 

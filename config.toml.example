@@ -19,6 +19,10 @@ log_level = "info"
 # Maximum upload size in bytes (default: 5 GiB = 5368709120).
 #max_upload_size = 5368709120
 
+# How long an upload may go without receiving data before it is abandoned with 408 Request Timeout (default: 60s).
+# Uploads can take as long as they need while data keeps arriving. Set to "0s" to wait indefinitely.
+#upload_idle_timeout = "60s"
+
 # Per-IP rate limit on batch and lock requests: tokens per fixed window (default: 600 per 1m). Signed object
 # transfers are not rate limited.
 #rate_limit_tokens = 600

@@ -13,6 +13,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -60,6 +61,8 @@ type Handler struct {
 	maxUploadSize int64
 	signer        *URLSigner
 	lockStore     LockStore
+
+	uploadIdleTimeout time.Duration
 }
 
 // HandlerConfig holds the dependencies for creating a Handler.
@@ -71,6 +74,9 @@ type HandlerConfig struct {
 	MaxUploadSize int64
 	Signer        *URLSigner
 	LockStore     LockStore
+
+	// UploadIdleTimeout abandons an upload whose client sends no data for this long; zero waits indefinitely.
+	UploadIdleTimeout time.Duration
 }
 
 // NewHandler creates a Handler for the given configuration.
@@ -83,6 +89,8 @@ func NewHandler(cfg HandlerConfig) *Handler {
 		maxUploadSize: cfg.MaxUploadSize,
 		signer:        cfg.Signer,
 		lockStore:     cfg.LockStore,
+
+		uploadIdleTimeout: cfg.UploadIdleTimeout,
 	}
 }
 
@@ -259,9 +267,14 @@ func (h *Handler) UploadHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Enforce the upload size limit at the reader level.
-	body := http.MaxBytesReader(w, r.Body, h.maxUploadSize)
+	body := withIdleTimeout(w, http.MaxBytesReader(w, r.Body, h.maxUploadSize), h.uploadIdleTimeout)
 
 	if err := h.store.Put(r.Context(), h.endpoint.Path, oid, body, r.ContentLength); err != nil {
+		if errors.Is(err, os.ErrDeadlineExceeded) {
+			middleware.Logger(r.Context()).Warn().Err(err).Str("oid", oid).Msg("upload stalled")
+			writeError(w, r, http.StatusRequestTimeout, fmt.Sprintf("no upload data received for %s", h.uploadIdleTimeout))
+			return
+		}
 		if errors.Is(err, storage.ErrHashMismatch) {
 			writeError(w, r, http.StatusBadRequest, "SHA-256 hash mismatch")
 			return

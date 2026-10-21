@@ -400,6 +400,9 @@ authentication = "none"
 	if cfg.Options.ShutdownTimeoutDuration != 30*time.Second {
 		t.Errorf("default ShutdownTimeoutDuration = %v, want %v", cfg.Options.ShutdownTimeoutDuration, 30*time.Second)
 	}
+	if cfg.Options.UploadIdleTimeoutDuration != time.Minute {
+		t.Errorf("default UploadIdleTimeoutDuration = %v, want %v", cfg.Options.UploadIdleTimeoutDuration, time.Minute)
+	}
 }
 
 func TestLoadProblemMessages(t *testing.T) {
@@ -460,6 +463,11 @@ func TestLoadProblemMessages(t *testing.T) {
 			name:   "zero shutdown_timeout",
 			config: "[options]\nshutdown_timeout = \"0s\"\n\n" + endpoint("name = \"Test\"\nvisibility = \"public\"\nauthentication = \"none\"\n"),
 			want:   "shutdown_timeout must be positive",
+		},
+		{
+			name:   "negative upload_idle_timeout",
+			config: "[options]\nupload_idle_timeout = \"-1s\"\n\n" + endpoint("name = \"Test\"\nvisibility = \"public\"\nauthentication = \"none\"\n"),
+			want:   "upload_idle_timeout must not be negative",
 		},
 	}
 	for _, tt := range tests {
@@ -637,6 +645,7 @@ authentication = "none"
 	t.Setenv("ANCHOR_LFS_LISTEN", ":9999")
 	t.Setenv("ANCHOR_LFS_DATA_DIR", "/custom/data")
 	t.Setenv("ANCHOR_LFS_SHUTDOWN_TIMEOUT", "2m")
+	t.Setenv("ANCHOR_LFS_UPLOAD_IDLE_TIMEOUT", "0s")
 
 	cfg, err := Load(path)
 	if err != nil {
@@ -651,6 +660,9 @@ authentication = "none"
 	}
 	if cfg.Options.ShutdownTimeoutDuration != 2*time.Minute {
 		t.Errorf("env override ShutdownTimeoutDuration = %v, want %v", cfg.Options.ShutdownTimeoutDuration, 2*time.Minute)
+	}
+	if cfg.Options.UploadIdleTimeoutDuration != 0 {
+		t.Errorf("env override UploadIdleTimeoutDuration = %v, want 0", cfg.Options.UploadIdleTimeoutDuration)
 	}
 }
 

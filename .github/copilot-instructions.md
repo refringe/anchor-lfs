@@ -92,6 +92,8 @@ The job display names above are the required status check contexts in the reposi
 │   ├── handler.go          # HTTP handlers: Batch, Download, Upload, Verify, Lock CRUD
 │   ├── handler_test.go
 │   ├── batch.go            # Batch response building (processBatch)
+│   ├── idle.go             # Per-read idle deadline on upload bodies (upload_idle_timeout, 408 on a stall)
+│   ├── idle_test.go
 │   ├── models.go           # Request/response JSON structs
 │   ├── signer.go           # HMAC-signed URL generation and verification
 │   ├── signer_test.go

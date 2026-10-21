@@ -169,6 +169,8 @@ func main() {
 			MaxUploadSize: cfg.Options.MaxUploadSize,
 			Signer:        signer,
 			LockStore:     lockStore,
+
+			UploadIdleTimeout: cfg.Options.UploadIdleTimeoutDuration,
 		})
 
 		prefix := ep.Path
