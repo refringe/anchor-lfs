@@ -36,7 +36,7 @@ Five workflows run on every push/PR to `develop` and `main` (in `.github/workflo
 4. **Vulnerability** (`vulnerability.yml`): job `Vulnerability Check` (`make vulncheck`)
 5. **CodeQL** (`codeql.yml`): job `Analyse`, matrix over `actions` and `go`
 
-A sixth workflow (`release.yml`) runs only on version tags and builds/publishes Docker images. All workflows use the Go version from `go.mod`.
+A sixth workflow (`release.yml`) runs only on version tags. It checks the tagged commit is on `main`, calls workflows 1 to 4 through `workflow_call`, then publishes the Docker image and the GitHub release in separate least-privilege jobs. All workflows use the Go version from `go.mod`, and every action is pinned to a commit SHA with a `# vX.Y.Z` comment that Dependabot keeps current.
 
 The job display names above are the required status check contexts in the repository's `develop` branch ruleset — renaming a job requires updating the ruleset. The repository also has a `main` ruleset blocking deletion and force-pushes.
 
