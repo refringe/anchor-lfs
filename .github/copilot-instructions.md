@@ -113,7 +113,7 @@ The job display names above are the required status check contexts in the reposi
 │   ├── logging.go          # Structured request logging middleware
 │   └── logging_test.go
 ├── internal/
-│   ├── sanitise/           # Path sanitisation for endpoint directory names
+│   ├── sanitise/           # Path sanitisation for endpoint directory names (letters, digits, ., _, -; no leading dot)
 │   └── testutil/           # Shared test helpers (e.g., SHA-256 computation)
 ├── Makefile                # All build/test/lint commands
 ├── .golangci.yml           # Linter configuration (23 linters, UK English)

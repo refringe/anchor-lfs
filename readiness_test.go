@@ -148,7 +148,7 @@ func TestCheckReady(t *testing.T) {
 }
 
 func TestRunHealthcheck(t *testing.T) {
-	srv, _ := newIntegrationServer(t, 1000)
+	srv, _ := newIntegrationServer(t, "/org/repo", 1000)
 	writeHealthcheckConfig := func(listen string) string {
 		t.Helper()
 		path := filepath.Join(t.TempDir(), "config.toml")

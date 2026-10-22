@@ -813,7 +813,7 @@ authentication = "none"
 }
 
 func TestLoadReservedEndpointPath(t *testing.T) {
-	for _, reserved := range []string{"/health", "/ready"} {
+	for _, reserved := range []string{"/health", "/ready", "/locks", "/signing.key", "/Signing.Key"} {
 		t.Run(reserved, func(t *testing.T) {
 			path := writeConfig(t, `
 [[endpoints]]
@@ -966,6 +966,7 @@ func TestLoadRejectsMalformedEndpointPath(t *testing.T) {
 		{"missing leading slash", "org/repo"},
 		{"empty segment", "/org//repo"},
 		{"dot segment", "/org/./repo"},
+		{"dot-dot segment", "/org/../repo"},
 	}
 
 	for _, tt := range tests {
@@ -1030,18 +1031,41 @@ authentication = "none"
 }
 
 func TestLoadUnsafeEndpointPath(t *testing.T) {
-	path := writeConfig(t, `
+	for _, endpoint := range []string{"/.hidden/repo", "/org/repo@v2", "/org/my repo"} {
+		t.Run(endpoint, func(t *testing.T) {
+			path := writeConfig(t, `
 [[endpoints]]
-name = "Dotted Org"
+name = "Unsafe"
 url = "https://github.com/org/repo"
-endpoint = "/my.org/repo"
+endpoint = "`+endpoint+`"
 visibility = "public"
 authentication = "none"
 `)
 
-	_, err := Load(path)
-	if err == nil {
-		t.Fatal("expected error for endpoint path with unsafe characters")
+			_, err := Load(path)
+			if err == nil || !strings.Contains(err.Error(), "may only contain letters") {
+				t.Fatalf("Load error = %v, want an unsafe characters error", err)
+			}
+		})
+	}
+}
+
+func TestLoadDottedEndpointPath(t *testing.T) {
+	path := writeConfig(t, `
+[[endpoints]]
+name = "Dotted"
+url = "https://github.com/my.org/repo.js"
+endpoint = "/my.org/repo.js.git/info/lfs"
+visibility = "public"
+authentication = "none"
+`)
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got := cfg.Endpoints[0].Path; got != "/my.org/repo.js.git/info/lfs" {
+		t.Errorf("Path = %q, want %q", got, "/my.org/repo.js.git/info/lfs")
 	}
 }
 

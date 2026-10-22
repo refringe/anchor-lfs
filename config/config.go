@@ -547,6 +547,12 @@ func (c *Config) validate() []error {
 	return problems
 }
 
+// reservedDataDirEntries are names in the data directory that no endpoint's storage directory may use.
+var reservedDataDirEntries = map[string]struct{}{
+	"locks":       {},
+	"signing.key": {},
+}
+
 // validateEndpointPath checks an endpoint path, then records the path and its storage directory as taken by label.
 func validateEndpointPath(endpointPath, label string, paths map[string]struct{}, dirs map[string]string) error {
 	reservedPaths := map[string]struct{}{
@@ -571,7 +577,11 @@ func validateEndpointPath(endpointPath, label string, paths map[string]struct{},
 	}
 	dir := sanitise.Endpoint(endpointPath)
 	if dir == sanitise.InvalidEndpoint {
-		return fmt.Errorf("path %q contains characters that are unsafe for storage directories", endpointPath)
+		return fmt.Errorf("path %q may only contain letters, digits, \".\", \"_\" and \"-\" between slashes, "+
+			"and may not start with \"/.\"", endpointPath)
+	}
+	if _, reserved := reservedDataDirEntries[strings.ToLower(dir)]; reserved {
+		return fmt.Errorf("path %q is reserved: the data directory already uses %q", endpointPath, strings.ToLower(dir))
 	}
 	if other, taken := dirs[strings.ToLower(dir)]; taken {
 		return fmt.Errorf("path %q uses the same storage directory %q as %s", endpointPath, dir, other)

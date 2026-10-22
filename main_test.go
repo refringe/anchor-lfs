@@ -83,15 +83,15 @@ func TestLoadOrGenerateSigningKeyRejectsTooShort(t *testing.T) {
 	}
 }
 
-// newIntegrationServer starts a test server for the /org/repo endpoint, allowing rateLimitTokens per minute per IP.
-func newIntegrationServer(t *testing.T, rateLimitTokens uint64) (*httptest.Server, *storage.Local) {
+// newIntegrationServer serves an endpoint at endpointPath, allowing rateLimitTokens requests per minute per IP.
+func newIntegrationServer(t *testing.T, endpointPath string, rateLimitTokens uint64) (*httptest.Server, *storage.Local) {
 	t.Helper()
 	dir := t.TempDir()
 	store := storage.NewLocal(dir)
 	ep := &config.Endpoint{
 		Name:           "test",
 		URL:            "https://github.com/org/repo",
-		Path:           "/org/repo",
+		Path:           endpointPath,
 		Visibility:     "public",
 		Authentication: "none",
 		GitHubOwner:    "org",
@@ -165,7 +165,7 @@ func TestEnsureWritableDirRejectsReadOnlyDirectory(t *testing.T) {
 }
 
 func TestIntegrationRouting(t *testing.T) {
-	srv, _ := newIntegrationServer(t, 1000)
+	srv, _ := newIntegrationServer(t, "/org/repo", 1000)
 
 	ctx := t.Context()
 	client := srv.Client()
@@ -304,7 +304,7 @@ func doLFSRequest(t *testing.T, srv *httptest.Server, method, url string, body [
 }
 
 func TestIntegrationRateLimitsOnlyControlRoutes(t *testing.T) {
-	srv, _ := newIntegrationServer(t, 2)
+	srv, _ := newIntegrationServer(t, "/org/repo", 2)
 	batchURL := srv.URL + "/org/repo/objects/batch"
 	data := []byte("rate limit test data")
 	objects := []lfs.Object{{OID: testutil.SHA256Hex(data), Size: int64(len(data))}}
@@ -350,7 +350,7 @@ func TestIntegrationRateLimitsOnlyControlRoutes(t *testing.T) {
 }
 
 func TestIntegrationServiceRoutesAndUnknownPaths(t *testing.T) {
-	srv, _ := newIntegrationServer(t, 1000)
+	srv, _ := newIntegrationServer(t, "/org/repo", 1000)
 	tests := []struct {
 		method          string
 		path            string
@@ -399,7 +399,7 @@ func TestIntegrationServiceRoutesAndUnknownPaths(t *testing.T) {
 }
 
 func TestIntegrationRequestIDs(t *testing.T) {
-	srv, _ := newIntegrationServer(t, 1)
+	srv, _ := newIntegrationServer(t, "/org/repo", 1)
 	batchBody, _ := json.Marshal(lfs.BatchRequest{Operation: "download", Objects: []lfs.Object{}})
 	tests := []struct {
 		name       string
@@ -464,56 +464,60 @@ func TestIntegrationGitLFSClientPush(t *testing.T) {
 		}
 	}
 
-	srv, store := newIntegrationServer(t, 1000)
+	for _, endpointPath := range []string{"/org/repo", "/org/repo.js.git/info/lfs"} {
+		t.Run(endpointPath, func(t *testing.T) {
+			srv, store := newIntegrationServer(t, endpointPath, 1000)
 
-	home := t.TempDir()
-	env := slices.DeleteFunc(os.Environ(), func(kv string) bool {
-		return strings.HasPrefix(kv, "GIT_") || strings.HasPrefix(kv, "HOME=") || strings.HasPrefix(kv, "XDG_CONFIG_HOME=")
-	})
-	env = append(env, "HOME="+home, "XDG_CONFIG_HOME="+home, "GIT_CONFIG_NOSYSTEM=1", "GIT_TERMINAL_PROMPT=0")
+			home := t.TempDir()
+			env := slices.DeleteFunc(os.Environ(), func(kv string) bool {
+				return strings.HasPrefix(kv, "GIT_") || strings.HasPrefix(kv, "HOME=") || strings.HasPrefix(kv, "XDG_CONFIG_HOME=")
+			})
+			env = append(env, "HOME="+home, "XDG_CONFIG_HOME="+home, "GIT_CONFIG_NOSYSTEM=1", "GIT_TERMINAL_PROMPT=0")
 
-	git := func(dir string, args ...string) {
-		t.Helper()
-		cmd := exec.CommandContext(t.Context(), "git", args...) //nolint:gosec // arguments are fixed strings in this test
-		cmd.Dir = dir
-		cmd.Env = env
-		if out, err := cmd.CombinedOutput(); err != nil {
-			t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, out)
-		}
-	}
+			git := func(dir string, args ...string) {
+				t.Helper()
+				cmd := exec.CommandContext(t.Context(), "git", args...) //nolint:gosec // arguments are fixed strings in this test
+				cmd.Dir = dir
+				cmd.Env = env
+				if out, err := cmd.CombinedOutput(); err != nil {
+					t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, out)
+				}
+			}
 
-	remote := t.TempDir()
-	git(remote, "init", "--bare")
+			remote := t.TempDir()
+			git(remote, "init", "--bare")
 
-	repo := t.TempDir()
-	git(repo, "init")
-	git(repo, "config", "user.name", "Anchor Test")
-	git(repo, "config", "user.email", "test@example.com")
-	git(repo, "config", "lfs.url", srv.URL+"/org/repo")
-	git(repo, "remote", "add", "origin", remote)
-	git(repo, "lfs", "install", "--local")
-	git(repo, "lfs", "track", "*.txt", "*.png")
+			repo := t.TempDir()
+			git(repo, "init")
+			git(repo, "config", "user.name", "Anchor Test")
+			git(repo, "config", "user.email", "test@example.com")
+			git(repo, "config", "lfs.url", srv.URL+endpointPath)
+			git(repo, "remote", "add", "origin", remote)
+			git(repo, "lfs", "install", "--local")
+			git(repo, "lfs", "track", "*.txt", "*.png")
 
-	files := map[string][]byte{
-		"notes.txt": []byte("plain text tracked by Git LFS\n"),
-		"image.png": append([]byte("\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR"), make([]byte, 64)...),
-	}
-	for name, data := range files {
-		if err := os.WriteFile(filepath.Join(repo, name), data, 0o600); err != nil {
-			t.Fatal(err)
-		}
-	}
-	git(repo, "add", ".gitattributes", "notes.txt", "image.png")
-	git(repo, "commit", "-m", "add LFS files")
-	git(repo, "lfs", "push", "--all", "origin")
+			files := map[string][]byte{
+				"notes.txt": []byte("plain text tracked by Git LFS\n"),
+				"image.png": append([]byte("\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR"), make([]byte, 64)...),
+			}
+			for name, data := range files {
+				if err := os.WriteFile(filepath.Join(repo, name), data, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			git(repo, "add", ".gitattributes", "notes.txt", "image.png")
+			git(repo, "commit", "-m", "add LFS files")
+			git(repo, "lfs", "push", "--all", "origin")
 
-	for name, data := range files {
-		exists, err := store.Exists(t.Context(), "/org/repo", testutil.SHA256Hex(data))
-		if err != nil {
-			t.Fatalf("Exists(%s): %v", name, err)
-		}
-		if !exists {
-			t.Errorf("%s was not stored", name)
-		}
+			for name, data := range files {
+				exists, err := store.Exists(t.Context(), endpointPath, testutil.SHA256Hex(data))
+				if err != nil {
+					t.Fatalf("Exists(%s): %v", name, err)
+				}
+				if !exists {
+					t.Errorf("%s was not stored", name)
+				}
+			}
+		})
 	}
 }
