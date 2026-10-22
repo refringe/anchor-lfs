@@ -29,7 +29,7 @@ make fmt          # Format code
 make prettier     # Format JSON and YAML
 make test         # Run tests with race detector
 make lint         # Run golangci-lint
-make vet          # Run go vet
+make vet          # Run go vet for Linux, macOS and Windows
 make vulncheck    # Run govulncheck
 ```
 

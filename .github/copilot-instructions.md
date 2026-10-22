@@ -20,7 +20,8 @@ Always run these commands from the repository root. The `Makefile` is the single
 | Format fix | `make fmt` | Runs `gofmt -w .` |
 | Prettier check | `make prettier-check` | Fails if any JSON/YAML file needs formatting |
 | Prettier fix | `make prettier` | Runs `prettier --write` over JSON/YAML |
-| Vet | `go vet ./...` | Also run in CI |
+| Vet | `make vet` | `go vet` for linux, darwin and windows; also run in CI |
+| Vulnerability scan | `make vulncheck` | `go tool govulncheck` (pinned in `go.mod`) |
 | Tidy check | `go mod tidy && git diff --exit-code go.mod go.sum` | CI rejects untidy modules |
 | Full check | `make check` | Runs: fmt-check, prettier-check, lint, vet, vulncheck, test |
 
@@ -28,15 +29,16 @@ Always run these commands from the repository root. The `Makefile` is the single
 
 ## CI Pipelines (GitHub Actions)
 
-Five workflows run on every push/PR to `develop` and `main` (in `.github/workflows/`):
+Six workflows run on every push/PR to `develop` and `main` (in `.github/workflows/`):
 
 1. **Format** (`format.yml`): jobs `Go Format` (`make fmt-check`) and `Prettier` (`make prettier-check`)
-2. **Quality** (`quality.yml`): job `Lint`: `go mod tidy` cleanliness check, no-`replace`-directive check, `make vet`, `make lint`
+2. **Quality** (`quality.yml`): job `Lint`: `go mod tidy` cleanliness check, no-`replace`-directive check, `make vet` (linux, darwin and windows), `make lint`
 3. **Tests** (`tests.yml`): jobs `Test` (`make test`), `Coverage` (`make test-cover`, uploads `coverage.out` as an artifact) and `S3 Integration` (runs `TestS3Integration*` against a RustFS container)
-4. **Vulnerability** (`vulnerability.yml`): job `Vulnerability Check` (`make vulncheck`)
-5. **CodeQL** (`codeql.yml`): job `Analyse`, matrix over `actions` and `go`
+4. **Vulnerability** (`vulnerability.yml`): job `Vulnerability Check` (`make vulncheck`); also runs weekly (Monday 06:23 UTC) and on demand
+5. **CodeQL** (`codeql.yml`): job `Analyse`, matrix over `actions` and `go`; also runs weekly (Monday 06:23 UTC) and on demand
+6. **Docker** (`docker.yml`): job `Docker Build` builds the image for `linux/amd64` and `linux/arm64` without pushing, then runs `anchor-lfs version` in the amd64 image
 
-A sixth workflow (`release.yml`) runs only on version tags. It checks the tagged commit is on `main`, calls workflows 1 to 4 through `workflow_call`, then publishes the Docker image and the GitHub release in separate least-privilege jobs. All workflows use the Go version from `go.mod`, and every action is pinned to a commit SHA with a `# vX.Y.Z` comment that Dependabot keeps current.
+A seventh workflow (`release.yml`) runs only on version tags. It checks the tagged commit is on `main`, calls workflows 1 to 4 through `workflow_call`, then publishes the Docker image and the GitHub release in separate least-privilege jobs. All workflows use the Go version from `go.mod`, and every action is pinned to a commit SHA with a `# vX.Y.Z` comment that Dependabot keeps current.
 
 The job display names above are the required status check contexts in the repository's `develop` branch ruleset, so renaming a job requires updating the ruleset. The repository also has a `main` ruleset blocking deletion and force-pushes.
 
@@ -122,7 +124,7 @@ The job display names above are the required status check contexts in the reposi
 ├── Dockerfile              # Multi-stage build (golang:1.27-alpine -> alpine:3.24)
 ├── docker-compose.yml      # Docker Compose deployment of the published ghcr.io/refringe/anchor-lfs:latest image
 └── .github/
-    ├── workflows/          # CI pipelines (format, quality, tests, vulnerability, codeql, release)
+    ├── workflows/          # CI pipelines (format, quality, tests, vulnerability, codeql, docker, release)
     ├── CONTRIBUTING.md     # Contribution guidelines
     └── PULL_REQUEST_TEMPLATE.md
 ```
