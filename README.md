@@ -27,6 +27,8 @@ mkdir -p data && sudo chown 100:101 data
 docker compose up -d
 ```
 
+This runs the published image `ghcr.io/refringe/anchor-lfs:latest`. See the [Docker](https://github.com/refringe/anchor-lfs/wiki/Docker) wiki page for release tags and building your own image.
+
 ### From Source
 
 Requires Go 1.27 or later.
@@ -77,7 +79,7 @@ make clean        # Remove build artefacts
 Docker commands:
 
 ```bash
-make docker-build   # Build Docker image
+make docker-build   # Build a local anchor-lfs image
 make docker-up      # Start containers
 make docker-down    # Stop containers
 make docker-logs    # Tail container logs

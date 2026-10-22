@@ -1,6 +1,7 @@
 services:
   anchor-lfs:
-    build: .
+    # Pin a release such as 0.1 in production. For a local build, run `make docker-build` and use: image: anchor-lfs
+    image: ghcr.io/refringe/anchor-lfs:latest
     ports:
       - '5420:5420'
     volumes:

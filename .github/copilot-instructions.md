@@ -118,7 +118,7 @@ The job display names above are the required status check contexts in the reposi
 ├── .prettierrc.json        # Prettier configuration (JSON/YAML formatting)
 ├── config.toml.example     # Example configuration file
 ├── Dockerfile              # Multi-stage build (golang:1.27-alpine -> alpine:3.24)
-├── docker-compose.yml      # Docker Compose for local development
+├── docker-compose.yml      # Docker Compose deployment of the published ghcr.io/refringe/anchor-lfs:latest image
 └── .github/
     ├── workflows/          # CI pipelines (format, quality, tests, vulnerability, codeql, release)
     ├── CONTRIBUTING.md     # Contribution guidelines

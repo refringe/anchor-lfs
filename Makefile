@@ -49,7 +49,7 @@ tidy:
 
 # Docker
 docker-build:
-	docker compose build
+	docker build --build-arg VERSION=$(VERSION) --build-arg COMMIT=$(COMMIT) --build-arg DATE=$(DATE) -t anchor-lfs .
 
 docker-up:
 	docker compose up -d
