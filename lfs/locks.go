@@ -1,6 +1,7 @@
 package lfs
 
 import (
+	"bytes"
 	"cmp"
 	"context"
 	"encoding/json/v2"
@@ -64,15 +65,94 @@ const (
 type FileLockStore struct {
 	basePath string
 	mutexes  sync.Map // map[string]*sync.RWMutex
-	cache    sync.Map // map[string]cachedLocks — keyed by sanitised endpoint
+	cache    sync.Map // map[string]cachedLocks, keyed by sanitised endpoint
 }
 
-// cachedLocks pairs a lock slice with the file metadata that was current
-// when the cache was populated. A stat() comparison on read detects
-// external modifications without re-reading the file contents.
+// cachedLocks pairs an endpoint's indexed locks with the contents and metadata of the lock file they match.
 type cachedLocks struct {
-	locks []Lock
-	info  os.FileInfo
+	set  *lockSet
+	data []byte
+	info os.FileInfo
+}
+
+// lockSet holds an endpoint's locks sorted by creation time then ID, indexed by ID and by path.
+type lockSet struct {
+	sorted []Lock
+	byID   map[string]Lock
+	byPath map[string]Lock
+}
+
+// newLockSet sorts and indexes locks.
+func newLockSet(locks []Lock) *lockSet {
+	slices.SortFunc(locks, compareLocks)
+	set := &lockSet{sorted: locks, byID: make(map[string]Lock, len(locks)), byPath: make(map[string]Lock, len(locks))}
+	for _, l := range locks {
+		set.byID[l.ID] = l
+		set.byPath[l.Path] = l
+	}
+	return set
+}
+
+// compareLocks orders locks by creation time, then ID.
+func compareLocks(a, b Lock) int {
+	return cmp.Or(strings.Compare(a.LockedAt, b.LockedAt), strings.Compare(a.ID, b.ID))
+}
+
+// add inserts lock in sorted position and indexes it.
+func (set *lockSet) add(lock Lock) {
+	i, _ := slices.BinarySearchFunc(set.sorted, lock, compareLocks)
+	set.sorted = slices.Insert(set.sorted, i, lock)
+	set.byID[lock.ID] = lock
+	set.byPath[lock.Path] = lock
+}
+
+// remove deletes lock from the set.
+func (set *lockSet) remove(lock Lock) {
+	if i, found := slices.BinarySearchFunc(set.sorted, lock, compareLocks); found {
+		set.sorted = slices.Delete(set.sorted, i, i+1)
+	}
+	delete(set.byID, lock.ID)
+	if set.byPath[lock.Path].ID == lock.ID {
+		delete(set.byPath, lock.Path)
+	}
+}
+
+// list returns a copy of the page of locks matching opts and the cursor for the next page, or "" on the last page.
+func (set *lockSet) list(opts ListLocksOptions) ([]Lock, string) {
+	matches := set.sorted
+	if opts.Path != "" || opts.ID != "" {
+		matches = set.match(opts.Path, opts.ID)
+	}
+
+	// Skip past the lock with the cursor ID, or start from the beginning if it is not among the matches.
+	if cursor, ok := set.byID[opts.Cursor]; ok {
+		if i, found := slices.BinarySearchFunc(matches, cursor, compareLocks); found {
+			matches = matches[i+1:]
+		}
+	}
+
+	limit := opts.Limit
+	if limit <= 0 {
+		limit = defaultLockLimit
+	} else if limit > maxLockLimit {
+		limit = maxLockLimit
+	}
+	if len(matches) <= limit {
+		return slices.Clone(matches), ""
+	}
+	return slices.Clone(matches[:limit]), matches[limit-1].ID
+}
+
+// match returns the lock with the given path and ID, ignoring whichever is empty, as a slice of zero or one locks.
+func (set *lockSet) match(path, id string) []Lock {
+	lock, ok := set.byPath[path]
+	if path == "" {
+		lock, ok = set.byID[id]
+	}
+	if !ok || (id != "" && lock.ID != id) {
+		return nil
+	}
+	return []Lock{lock}
 }
 
 // NewFileLockStore creates a FileLockStore rooted at basePath.
@@ -80,7 +160,7 @@ func NewFileLockStore(basePath string) *FileLockStore {
 	return &FileLockStore{basePath: basePath}
 }
 
-// endpointMutex returns the per-endpoint mutex, creating one if needed.
+// endpointMutex returns the per-endpoint mutex, creating it on first use.
 func (s *FileLockStore) endpointMutex(endpoint string) *sync.RWMutex {
 	mu, _ := s.mutexes.LoadOrStore(sanitise.Endpoint(endpoint), &sync.RWMutex{})
 	return mu.(*sync.RWMutex)
@@ -118,27 +198,35 @@ func (s *FileLockStore) lockEndpoint(endpoint string) (func(), error) {
 	}, nil
 }
 
-// loadLocks returns cached locks while the on-disk file is unchanged; callers must hold the endpoint mutex.
-func (s *FileLockStore) loadLocks(endpoint string) ([]Lock, error) {
-	if cached, ok := s.cache.Load(sanitise.Endpoint(endpoint)); ok {
-		c := cached.(cachedLocks) //nolint:forcetypeassert // type is guaranteed by cache store
+// cached returns the endpoint's cache entry, if there is one.
+func (s *FileLockStore) cached(endpoint string) (cachedLocks, bool) {
+	entry, ok := s.cache.Load(sanitise.Endpoint(endpoint))
+	if !ok {
+		return cachedLocks{}, false
+	}
+	return entry.(cachedLocks), true //nolint:forcetypeassert // type is guaranteed by cache store
+}
+
+// loadLocks returns the cached locks while the lock file's metadata is unchanged; callers hold the endpoint mutex.
+func (s *FileLockStore) loadLocks(endpoint string) (*lockSet, error) {
+	if c, ok := s.cached(endpoint); ok {
 		info, err := os.Stat(s.lockFilePath(endpoint))
 		if err == nil && os.SameFile(c.info, info) && c.info.ModTime().Equal(info.ModTime()) && c.info.Size() == info.Size() {
-			return slices.Clone(c.locks), nil
+			return c.set, nil
 		}
 	}
 	return s.readLocks(endpoint)
 }
 
-// readLocks reads the endpoint's locks from disk and refreshes the cache.
-func (s *FileLockStore) readLocks(endpoint string) ([]Lock, error) {
+// readLocks reads the endpoint's lock file, reusing the cached locks when its contents are unchanged.
+func (s *FileLockStore) readLocks(endpoint string) (*lockSet, error) {
 	key := sanitise.Endpoint(endpoint)
 	path := s.lockFilePath(endpoint)
 
 	info, err := os.Stat(path)
 	if errors.Is(err, os.ErrNotExist) {
 		s.cache.Delete(key)
-		return nil, nil
+		return newLockSet(nil), nil
 	}
 	if err != nil {
 		return nil, fmt.Errorf("stat locks file: %w", err)
@@ -148,28 +236,54 @@ func (s *FileLockStore) readLocks(endpoint string) ([]Lock, error) {
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			s.cache.Delete(key)
-			return nil, nil
+			return newLockSet(nil), nil
 		}
 		return nil, fmt.Errorf("reading locks: %w", err)
 	}
+	if c, ok := s.cached(endpoint); ok && bytes.Equal(c.data, data) {
+		s.cache.Store(key, cachedLocks{set: c.set, data: data, info: info})
+		return c.set, nil
+	}
+
 	var locks []Lock
 	if err := json.Unmarshal(data, &locks); err != nil {
 		return nil, fmt.Errorf("parsing locks: %w", err)
 	}
-	s.cache.Store(key, cachedLocks{locks: slices.Clone(locks), info: info})
-	return locks, nil
+	set := newLockSet(locks)
+	s.cache.Store(key, cachedLocks{set: set, data: data, info: info})
+	return set, nil
 }
 
-// saveLocks writes locks to disk atomically (temp file + fsync + rename).
-func (s *FileLockStore) saveLocks(endpoint string, locks []Lock) error {
+// saveLocks writes set to the endpoint's lock file and caches it, or drops the endpoint's cache if the write fails.
+func (s *FileLockStore) saveLocks(endpoint string, set *lockSet) error {
+	key := sanitise.Endpoint(endpoint)
 	path := s.lockFilePath(endpoint)
-	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
-		return fmt.Errorf("creating lock directory: %w", err)
+
+	data, err := json.Marshal(set.sorted)
+	if err != nil {
+		s.cache.Delete(key)
+		return fmt.Errorf("marshalling locks: %w", err)
+	}
+	if err := writeLockFile(path, data); err != nil {
+		s.cache.Delete(key)
+		return err
 	}
 
-	data, err := json.Marshal(locks)
+	// Stat the written file so the cache entry matches the on-disk metadata.
+	info, err := os.Stat(path)
 	if err != nil {
-		return fmt.Errorf("marshalling locks: %w", err)
+		log.Warn().Err(err).Str("path", path).Msg("stat after writing lock file; cache invalidated")
+		s.cache.Delete(key)
+		return nil
+	}
+	s.cache.Store(key, cachedLocks{set: set, data: data, info: info})
+	return nil
+}
+
+// writeLockFile writes data to path atomically (temp file + fsync + rename).
+func writeLockFile(path string, data []byte) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+		return fmt.Errorf("creating lock directory: %w", err)
 	}
 
 	tmp, err := os.CreateTemp(filepath.Dir(path), storage.TempFilePrefix+"locks-*")
@@ -199,17 +313,6 @@ func (s *FileLockStore) saveLocks(endpoint string, locks []Lock) error {
 	if err := os.Rename(tmpPath, path); err != nil {
 		return fmt.Errorf("renaming lock file: %w", err)
 	}
-
-	// Stat the written file so the cache entry matches the on-disk metadata.
-	info, err := os.Stat(path)
-	if err != nil {
-		// The file was just written successfully, so a stat failure is unexpected. Delete the cache entry so the
-		// next read re-fetches from disk, and log the anomaly for operator visibility.
-		log.Warn().Err(err).Str("path", path).Msg("stat after writing lock file; cache invalidated")
-		s.cache.Delete(sanitise.Endpoint(endpoint))
-		return nil
-	}
-	s.cache.Store(sanitise.Endpoint(endpoint), cachedLocks{locks: slices.Clone(locks), info: info})
 	return nil
 }
 
@@ -224,18 +327,13 @@ func (s *FileLockStore) Create(ctx context.Context, endpoint, path, ownerName st
 	}
 	defer unlock()
 
-	locks, err := s.readLocks(endpoint)
+	set, err := s.readLocks(endpoint)
 	if err != nil {
 		return Lock{}, err
 	}
 
-	// Check for existing lock on the same path. Path comparison is
-	// case-sensitive because lock paths are Git-relative file paths and
-	// most filesystems (and the Git LFS spec) treat them as case-sensitive.
-	// This differs from owner comparison (case-insensitive) because
-	// usernames may vary in casing across auth providers.
-	if i := slices.IndexFunc(locks, func(l Lock) bool { return l.Path == path }); i >= 0 {
-		return locks[i], ErrLockExists
+	if existing, ok := set.byPath[path]; ok {
+		return existing, ErrLockExists
 	}
 
 	lock := Lock{
@@ -245,8 +343,8 @@ func (s *FileLockStore) Create(ctx context.Context, endpoint, path, ownerName st
 		Owner:    LockOwner{Name: ownerName},
 	}
 
-	locks = append(locks, lock)
-	if err := s.saveLocks(endpoint, locks); err != nil {
+	set.add(lock)
+	if err := s.saveLocks(endpoint, set); err != nil {
 		return Lock{}, err
 	}
 	return lock, nil
@@ -261,53 +359,12 @@ func (s *FileLockStore) List(ctx context.Context, endpoint string, opts ListLock
 	mu.RLock()
 	defer mu.RUnlock()
 
-	locks, err := s.loadLocks(endpoint)
+	set, err := s.loadLocks(endpoint)
 	if err != nil {
 		return nil, "", err
 	}
-
-	// Sort by creation time (stable order for pagination).
-	slices.SortFunc(locks, func(a, b Lock) int {
-		return cmp.Or(strings.Compare(a.LockedAt, b.LockedAt), strings.Compare(a.ID, b.ID))
-	})
-
-	// Apply filters.
-	var filtered []Lock
-	for _, l := range locks {
-		if opts.Path != "" && l.Path != opts.Path {
-			continue
-		}
-		if opts.ID != "" && l.ID != opts.ID {
-			continue
-		}
-		filtered = append(filtered, l)
-	}
-
-	// Apply cursor (skip past the lock with this ID).
-	if opts.Cursor != "" {
-		if idx := slices.IndexFunc(filtered, func(l Lock) bool { return l.ID == opts.Cursor }); idx >= 0 {
-			filtered = filtered[idx+1:]
-		}
-	}
-
-	// Apply limit.
-	limit := opts.Limit
-	if limit <= 0 {
-		limit = defaultLockLimit
-	} else if limit > maxLockLimit {
-		limit = maxLockLimit
-	}
-
-	// The cursor is set to the last item of the current page. On the next
-	// request, List skips past the lock matching this cursor ID (see above),
-	// so the next page starts at filtered[limit].
-	var nextCursor string
-	if len(filtered) > limit {
-		nextCursor = filtered[limit-1].ID
-		filtered = filtered[:limit]
-	}
-
-	return filtered, nextCursor, nil
+	locks, nextCursor := set.list(opts)
+	return locks, nextCursor, nil
 }
 
 // Unlock releases a lock by ID, checking ownership unless force is true.
@@ -321,24 +378,21 @@ func (s *FileLockStore) Unlock(ctx context.Context, endpoint, id, requester stri
 	}
 	defer unlock()
 
-	locks, err := s.readLocks(endpoint)
+	set, err := s.readLocks(endpoint)
 	if err != nil {
 		return Lock{}, err
 	}
 
-	idx := slices.IndexFunc(locks, func(l Lock) bool { return l.ID == id })
-	if idx < 0 {
+	lock, ok := set.byID[id]
+	if !ok {
 		return Lock{}, ErrLockNotFound
 	}
-
-	lock := locks[idx]
-	// Case-insensitive: usernames may vary in casing across auth providers.
 	if !force && !strings.EqualFold(lock.Owner.Name, requester) {
 		return Lock{}, ErrLockNotOwner
 	}
 
-	locks = slices.Delete(locks, idx, idx+1)
-	if err := s.saveLocks(endpoint, locks); err != nil {
+	set.remove(lock)
+	if err := s.saveLocks(endpoint, set); err != nil {
 		return Lock{}, err
 	}
 	return lock, nil

@@ -99,7 +99,7 @@ The job display names above are the required status check contexts in the reposi
 │   ├── models.go           # Request/response JSON structs
 │   ├── signer.go           # HMAC-signed URL generation and verification
 │   ├── signer_test.go
-│   ├── locks.go            # File lock store (JSON file-backed, cross-process file lock on writes)
+│   ├── locks.go            # File lock store (JSON file-backed, indexed in memory, cross-process file lock on writes)
 │   ├── locks_test.go
 │   ├── filelock_unix.go    # Unix advisory file lock (syscall.Flock)
 │   └── filelock_windows.go # Windows file lock (LockFileEx)
