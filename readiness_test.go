@@ -1,9 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json/v2"
 	"errors"
+	"io"
 	"maps"
 	"net/http"
 	"net/http/httptest"
@@ -147,7 +149,7 @@ func TestCheckReady(t *testing.T) {
 
 func TestRunHealthcheck(t *testing.T) {
 	srv, _ := newIntegrationServer(t, 1000)
-	writeHealthcheckConfig := func(listen string) {
+	writeHealthcheckConfig := func(listen string) string {
 		t.Helper()
 		path := filepath.Join(t.TempDir(), "config.toml")
 		content := `
@@ -164,18 +166,20 @@ authentication = "none"
 		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		t.Setenv("ANCHOR_LFS_CONFIG", path)
+		return path
 	}
 
-	writeHealthcheckConfig(srv.Listener.Addr().String())
-	if code := runHealthcheck(); code != 0 {
+	var stdout bytes.Buffer
+	if code := runHealthcheck(writeHealthcheckConfig(srv.Listener.Addr().String()), &stdout, io.Discard); code != 0 {
 		t.Errorf("runHealthcheck against a ready server = %d, want 0", code)
+	}
+	if stdout.String() != "ready\n" {
+		t.Errorf("stdout = %q, want %q", stdout.String(), "ready\n")
 	}
 
 	closed := httptest.NewServer(http.NotFoundHandler())
 	closed.Close()
-	writeHealthcheckConfig(closed.Listener.Addr().String())
-	if code := runHealthcheck(); code != 1 {
+	if code := runHealthcheck(writeHealthcheckConfig(closed.Listener.Addr().String()), io.Discard, io.Discard); code != 1 {
 		t.Errorf("runHealthcheck against a stopped server = %d, want 1", code)
 	}
 }

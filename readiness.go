@@ -8,7 +8,6 @@ import (
 	"io"
 	"net"
 	"net/http"
-	"os"
 	"sync"
 	"time"
 
@@ -84,10 +83,10 @@ func (rd *readiness) check(ctx context.Context) string {
 }
 
 // runHealthcheck asks the local server's GET /ready whether it is ready and returns the process exit code.
-func runHealthcheck() int {
-	cfg, err := config.Load(config.DefaultConfigPath)
+func runHealthcheck(configPath string, stdout, stderr io.Writer) int {
+	cfg, err := config.Load(configPath)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "healthcheck:", err)
+		_, _ = fmt.Fprintln(stderr, "healthcheck:", err)
 		return 1
 	}
 	url, err := readyURL(cfg.Options.ListenAddress)
@@ -95,10 +94,10 @@ func runHealthcheck() int {
 		err = checkReady(url)
 	}
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "healthcheck:", err)
+		_, _ = fmt.Fprintln(stderr, "healthcheck:", err)
 		return 1
 	}
-	fmt.Println("ready")
+	_, _ = fmt.Fprintln(stdout, "ready")
 	return 0
 }
 

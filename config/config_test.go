@@ -21,6 +21,28 @@ func writeConfig(t *testing.T, content string) string {
 	return path
 }
 
+func TestResolvePath(t *testing.T) {
+	tests := []struct {
+		name     string
+		flagPath string
+		env      string
+		want     string
+	}{
+		{name: "default", want: DefaultConfigPath},
+		{name: "environment", env: "/etc/env.toml", want: "/etc/env.toml"},
+		{name: "flag", flagPath: "/etc/flag.toml", want: "/etc/flag.toml"},
+		{name: "flag over environment", flagPath: "/etc/flag.toml", env: "/etc/env.toml", want: "/etc/flag.toml"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("ANCHOR_LFS_CONFIG", tt.env)
+			if got := ResolvePath(tt.flagPath); got != tt.want {
+				t.Errorf("ResolvePath(%q) = %q, want %q", tt.flagPath, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestLoadValid(t *testing.T) {
 	path := writeConfig(t, `
 [options]

@@ -7,7 +7,7 @@ import (
 	"encoding/json/v2"
 	"errors"
 	"fmt"
-	"io"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -36,14 +36,15 @@ var (
 )
 
 func main() {
-	if len(os.Args) > 1 {
-		os.Exit(runCommand(os.Args[1:], os.Stdout, os.Stderr))
-	}
+	os.Exit(runCommand(os.Args[1:], os.Stdout, os.Stderr))
+}
 
+// serve runs the server with the configuration at configPath until it receives SIGINT or SIGTERM.
+func serve(configPath string) {
 	// Default: JSON to stderr.
 	log.Logger = zerolog.New(os.Stderr).With().Timestamp().Logger()
 
-	cfg, err := config.Load(config.DefaultConfigPath)
+	cfg, err := config.Load(configPath)
 	if invalid, ok := errors.AsType[*config.ValidationError](err); ok {
 		log.Fatal().Errs("errors", invalid.Problems).Msg("failed to load configuration")
 	}
@@ -57,7 +58,18 @@ func main() {
 		Str("version", version).
 		Str("commit", commit).
 		Str("built", date).
+		Str("config", absolutePath(configPath)).
 		Msg("starting anchor-lfs")
+	log.Info().
+		Str("listen_address", cfg.Options.ListenAddress).
+		Int64("max_upload_size", cfg.Options.MaxUploadSize).
+		Uint64("rate_limit_tokens", cfg.Options.RateLimitTokens).
+		Str("rate_limit_window", cfg.Options.RateLimitWindow).
+		Str("url_expiry", cfg.Options.URLExpiry).
+		Str("auth_cache_ttl", cfg.Options.AuthCacheTTL).
+		Str("upload_idle_timeout", cfg.Options.UploadIdleTimeout).
+		Str("shutdown_timeout", cfg.Options.ShutdownTimeout).
+		Msg("settings")
 
 	if err := ensureWritableDir(cfg.Options.DataDirectory); err != nil {
 		log.Fatal().Err(err).Int("uid", os.Getuid()).Int("gid", os.Getgid()).Msg("checking data directory")
@@ -192,7 +204,6 @@ func main() {
 	registerServiceRoutes(mux, newReadiness(store, cfg.Options.DataDirectory))
 
 	server := &http.Server{
-		Addr:    cfg.Options.ListenAddress,
 		Handler: serverHandler(mux, proxyTrust, cfg.Options.AccessLogEnabled()),
 
 		ReadHeaderTimeout: 10 * time.Second,
@@ -208,9 +219,14 @@ func main() {
 	done := make(chan os.Signal, 1)
 	signal.Notify(done, os.Interrupt, syscall.SIGTERM)
 
+	var listenConfig net.ListenConfig
+	listener, err := listenConfig.Listen(context.Background(), "tcp", cfg.Options.ListenAddress)
+	if err != nil {
+		log.Fatal().Err(err).Str("address", cfg.Options.ListenAddress).Msg("listening")
+	}
+	log.Info().Str("address", listener.Addr().String()).Msg("listening")
 	go func() {
-		log.Info().Str("address", cfg.Options.ListenAddress).Msg("listening")
-		if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		if err := server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			log.Fatal().Err(err).Msg("server error")
 		}
 	}()
@@ -248,38 +264,6 @@ func serverHandler(mux http.Handler, proxyTrust *middleware.ProxyTrust, accessLo
 	return proxyTrust.Handler(middleware.RequestID(handler))
 }
 
-// usage describes the command line.
-const usage = `Usage: anchor-lfs [command]
-
-Without a command, anchor-lfs starts the server, reading config.toml or the file named by ANCHOR_LFS_CONFIG.
-
-Commands:
-  healthcheck  Exit 0 if the local server's GET /ready answers 200, or 1 otherwise
-  version      Print the version, commit and build date
-  help         Print this help
-`
-
-// runCommand runs the command named by args[0] and returns the process exit code.
-func runCommand(args []string, stdout, stderr io.Writer) int {
-	if len(args) > 1 {
-		_, _ = fmt.Fprintf(stderr, "anchor-lfs: unexpected argument %q\n\n%s", args[1], usage)
-		return 2
-	}
-	switch args[0] {
-	case "healthcheck":
-		return runHealthcheck()
-	case "version":
-		_, _ = fmt.Fprintf(stdout, "anchor-lfs %s (commit %s, built %s)\n", version, commit, date)
-		return 0
-	case "help", "-h", "--help":
-		_, _ = fmt.Fprint(stdout, usage)
-		return 0
-	default:
-		_, _ = fmt.Fprintf(stderr, "anchor-lfs: unknown command %q\n\n%s", args[0], usage)
-		return 2
-	}
-}
-
 // configureLogging applies the configured log format and level to the global logger.
 func configureLogging(opts *config.Options) {
 	if opts.LogFormat == config.LogFormatConsole {
@@ -292,6 +276,14 @@ func configureLogging(opts *config.Options) {
 	if opts.AdditionalLogging {
 		log.Warn().Msg(`additional_logging is deprecated; set log_format = "console" and log_level = "debug" instead`)
 	}
+}
+
+// absolutePath returns path made absolute, or path itself when the working directory is unknown.
+func absolutePath(path string) string {
+	if abs, err := filepath.Abs(path); err == nil {
+		return abs
+	}
+	return path
 }
 
 // isTerminal reports whether f is a character device such as a terminal.

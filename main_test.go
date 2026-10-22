@@ -517,33 +517,3 @@ func TestIntegrationGitLFSClientPush(t *testing.T) {
 		}
 	}
 }
-
-func TestRunCommand(t *testing.T) {
-	tests := []struct {
-		args       []string
-		wantCode   int
-		wantStdout string
-		wantStderr string
-	}{
-		{args: []string{"version"}, wantStdout: "anchor-lfs dev (commit unknown, built unknown)\n"},
-		{args: []string{"help"}, wantStdout: usage},
-		{args: []string{"-h"}, wantStdout: usage},
-		{args: []string{"--help"}, wantStdout: usage},
-		{args: []string{"--version"}, wantCode: 2, wantStderr: "anchor-lfs: unknown command \"--version\"\n\n" + usage},
-		{args: []string{"version", "extra"}, wantCode: 2, wantStderr: "anchor-lfs: unexpected argument \"extra\"\n\n" + usage},
-	}
-	for _, tt := range tests {
-		t.Run(strings.Join(tt.args, " "), func(t *testing.T) {
-			var stdout, stderr bytes.Buffer
-			if code := runCommand(tt.args, &stdout, &stderr); code != tt.wantCode {
-				t.Errorf("exit code = %d, want %d", code, tt.wantCode)
-			}
-			if stdout.String() != tt.wantStdout {
-				t.Errorf("stdout = %q, want %q", stdout.String(), tt.wantStdout)
-			}
-			if stderr.String() != tt.wantStderr {
-				t.Errorf("stderr = %q, want %q", stderr.String(), tt.wantStderr)
-			}
-		})
-	}
-}

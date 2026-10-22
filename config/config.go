@@ -42,12 +42,12 @@ type Config struct {
 // Storage configures the object storage backend.
 type Storage struct {
 	Backend           string `toml:"backend"`
-	S3Bucket          string `toml:"s3_bucket"`
-	S3Region          string `toml:"s3_region"`
-	S3Endpoint        string `toml:"s3_endpoint"`
-	S3AccessKeyID     string `toml:"s3_access_key_id"`
-	S3SecretAccessKey string `toml:"s3_secret_access_key"`
-	S3Prefix          string `toml:"s3_prefix"`
+	S3Bucket          string `toml:"s3_bucket,omitempty"`
+	S3Region          string `toml:"s3_region,omitempty"`
+	S3Endpoint        string `toml:"s3_endpoint,omitempty"`
+	S3AccessKeyID     string `toml:"s3_access_key_id,omitempty"`
+	S3SecretAccessKey string `toml:"s3_secret_access_key,omitempty"`
+	S3Prefix          string `toml:"s3_prefix,omitempty"`
 	S3PresignedURLs   *bool  `toml:"s3_presigned_urls"`
 	S3ForcePathStyle  *bool  `toml:"s3_force_path_style"`
 }
@@ -78,7 +78,7 @@ const (
 type Options struct {
 	ListenAddress string `toml:"listen_address"`
 	DataDirectory string `toml:"data_directory"`
-	BaseURL       string `toml:"base_url"`
+	BaseURL       string `toml:"base_url,omitempty"`
 	MaxUploadSize int64  `toml:"max_upload_size"`
 
 	// Longest wait for more upload body data before the upload is abandoned; zero disables it.
@@ -89,7 +89,7 @@ type Options struct {
 	LogFormat         string `toml:"log_format"`
 	LogLevel          string `toml:"log_level"`
 	AccessLog         *bool  `toml:"access_log"`
-	AdditionalLogging bool   `toml:"additional_logging"`
+	AdditionalLogging bool   `toml:"additional_logging,omitempty"`
 
 	// Peers allowed to set X-Forwarded-For, X-Forwarded-Host and X-Forwarded-Proto.
 	TrustedProxies []string `toml:"trusted_proxies"`
@@ -104,7 +104,7 @@ type Options struct {
 	AuthCacheDuration time.Duration `toml:"-"`
 
 	// URL signing.
-	SigningKey        string        `toml:"signing_key"`
+	SigningKey        string        `toml:"signing_key,omitempty"`
 	SigningKeyBytes   []byte        `toml:"-"`
 	URLExpiry         string        `toml:"url_expiry"`
 	URLExpiryDuration time.Duration `toml:"-"`
@@ -129,7 +129,7 @@ type Endpoint struct {
 	Path           string `toml:"endpoint"` // "endpoint" in TOML for user clarity; "Path" in Go to avoid stuttering with the type name.
 	Visibility     string `toml:"visibility"`
 	Authentication string `toml:"authentication"`
-	GitHubAPIURL   string `toml:"github_api_url"`
+	GitHubAPIURL   string `toml:"github_api_url,omitempty"`
 
 	// Parsed from URL at load time.
 	GitHubOwner   string   `toml:"-"`
@@ -155,14 +155,20 @@ func (e *Endpoint) label(i int) string {
 	return fmt.Sprintf("endpoint %q", e.Name)
 }
 
-// Load reads and validates the configuration file. The path can be overridden
-// by the ANCHOR_LFS_CONFIG environment variable.
-func Load(path string) (*Config, error) {
-	if env := os.Getenv("ANCHOR_LFS_CONFIG"); env != "" {
-		path = env
+// ResolvePath returns flagPath if set, otherwise ANCHOR_LFS_CONFIG if set, otherwise DefaultConfigPath.
+func ResolvePath(flagPath string) string {
+	if flagPath != "" {
+		return flagPath
 	}
+	if env := os.Getenv("ANCHOR_LFS_CONFIG"); env != "" {
+		return env
+	}
+	return DefaultConfigPath
+}
 
-	data, err := os.ReadFile(path) //nolint:gosec // path is operator-controlled (config file or ANCHOR_LFS_CONFIG env var)
+// Load reads and validates the configuration file at path.
+func Load(path string) (*Config, error) {
+	data, err := os.ReadFile(path) //nolint:gosec // path is operator-controlled (--config flag or ANCHOR_LFS_CONFIG env var)
 	if err != nil {
 		return nil, fmt.Errorf("reading config: %w", err)
 	}

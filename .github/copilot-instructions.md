@@ -31,14 +31,14 @@ Always run these commands from the repository root. The `Makefile` is the single
 Five workflows run on every push/PR to `develop` and `main` (in `.github/workflows/`):
 
 1. **Format** (`format.yml`): jobs `Go Format` (`make fmt-check`) and `Prettier` (`make prettier-check`)
-2. **Quality** (`quality.yml`): job `Lint` — `go mod tidy` cleanliness check, no-`replace`-directive check, `make vet`, `make lint`
+2. **Quality** (`quality.yml`): job `Lint`: `go mod tidy` cleanliness check, no-`replace`-directive check, `make vet`, `make lint`
 3. **Tests** (`tests.yml`): jobs `Test` (`make test`), `Coverage` (`make test-cover`, uploads `coverage.out` as an artifact) and `S3 Integration` (runs `TestS3Integration*` against a RustFS container)
 4. **Vulnerability** (`vulnerability.yml`): job `Vulnerability Check` (`make vulncheck`)
 5. **CodeQL** (`codeql.yml`): job `Analyse`, matrix over `actions` and `go`
 
 A sixth workflow (`release.yml`) runs only on version tags. It checks the tagged commit is on `main`, calls workflows 1 to 4 through `workflow_call`, then publishes the Docker image and the GitHub release in separate least-privilege jobs. All workflows use the Go version from `go.mod`, and every action is pinned to a commit SHA with a `# vX.Y.Z` comment that Dependabot keeps current.
 
-The job display names above are the required status check contexts in the repository's `develop` branch ruleset — renaming a job requires updating the ruleset. The repository also has a `main` ruleset blocking deletion and force-pushes.
+The job display names above are the required status check contexts in the repository's `develop` branch ruleset, so renaming a job requires updating the ruleset. The repository also has a `main` ruleset blocking deletion and force-pushes.
 
 ## Code Style Requirements
 
@@ -65,7 +65,9 @@ The job display names above are the required status check contexts in the reposi
 
 ```
 .                           # Repository root (Go module: github.com/refringe/anchor-lfs)
-├── main.go                 # Entry point: help/version subcommands, config loading, wiring, route registration, temp file sweep, graceful shutdown
+├── cli.go                  # Command line: --config, check/healthcheck/version/help commands, redacted config printing
+├── cli_test.go
+├── main.go                 # Server: config loading, startup logging, wiring, route registration, temp file sweep, graceful shutdown
 ├── main_test.go            # Integration tests for the full server
 ├── readiness.go            # GET /ready checks and the `anchor-lfs healthcheck` subcommand (Docker HEALTHCHECK)
 ├── readiness_test.go
@@ -142,15 +144,15 @@ All endpoint routes are registered in `registerRoutes` in `main.go` with explici
 
 ## Configuration
 
-Configuration is loaded from `config.toml` (see `config.toml.example`). Environment variables with the `ANCHOR_LFS_` prefix override TOML values. The config file path can be overridden with `ANCHOR_LFS_CONFIG`. Tests create their own config in temporary directories and do not require `config.toml` to exist.
+Configuration is loaded from `config.toml` (see `config.toml.example`). Environment variables with the `ANCHOR_LFS_` prefix override TOML values. The config file path comes from `--config`, then `ANCHOR_LFS_CONFIG`, then `config.toml` (`config.ResolvePath`), and `anchor-lfs check` validates a file and prints it with secrets redacted. Tests create their own config in temporary directories and do not require `config.toml` to exist.
 
 ## Key Dependencies
 
-- `github.com/BurntSushi/toml` — TOML parsing
-- `github.com/rs/zerolog` — Structured logging
-- `github.com/sethvargo/go-limiter` — Rate limiting
-- `github.com/google/go-github/v69` — GitHub API client
-- `github.com/aws/aws-sdk-go-v2` — S3 storage backend
+- `github.com/BurntSushi/toml`: TOML parsing
+- `github.com/rs/zerolog`: Structured logging
+- `github.com/sethvargo/go-limiter`: Rate limiting
+- `github.com/google/go-github/v69`: GitHub API client
+- `github.com/aws/aws-sdk-go-v2`: S3 storage backend
 
 ## Trust These Instructions
 
