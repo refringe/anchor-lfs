@@ -53,6 +53,7 @@ Full documentation is available on the **[Wiki](https://github.com/refringe/anch
 - **[File Locking](https://github.com/refringe/anchor-lfs/wiki/File-Locking):** Coordinating concurrent edits
 - **[Reverse Proxy](https://github.com/refringe/anchor-lfs/wiki/Reverse-Proxy):** Running behind nginx, Caddy, or Traefik
 - **[Security](https://github.com/refringe/anchor-lfs/wiki/Security):** Security model and best practices
+- **[Operations](https://github.com/refringe/anchor-lfs/wiki/Operations):** Backups, upgrades, key rotation and storage migration
 - **[API Reference](https://github.com/refringe/anchor-lfs/wiki/API-Reference):** Endpoint routes and protocol details
 - **[Troubleshooting](https://github.com/refringe/anchor-lfs/wiki/Troubleshooting):** Common issues and solutions
 
