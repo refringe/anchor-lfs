@@ -315,6 +315,22 @@ func (c *Config) applyEnvOverrides() []error {
 	if v := os.Getenv("ANCHOR_LFS_UPLOAD_IDLE_TIMEOUT"); v != "" {
 		c.Options.UploadIdleTimeout = v
 	}
+	if v := os.Getenv("ANCHOR_LFS_RATE_LIMIT_TOKENS"); v != "" {
+		if n, err := strconv.ParseUint(v, 10, 64); err == nil && n > 0 {
+			c.Options.RateLimitTokens = n
+		} else {
+			problems = append(problems, fmt.Errorf("ANCHOR_LFS_RATE_LIMIT_TOKENS %q must be a positive whole number", v))
+		}
+	}
+	if v := os.Getenv("ANCHOR_LFS_RATE_LIMIT_WINDOW"); v != "" {
+		c.Options.RateLimitWindow = v
+	}
+	if v := os.Getenv("ANCHOR_LFS_AUTH_CACHE_TTL"); v != "" {
+		c.Options.AuthCacheTTL = v
+	}
+	if v := os.Getenv("ANCHOR_LFS_URL_EXPIRY"); v != "" {
+		c.Options.URLExpiry = v
+	}
 	if v := os.Getenv("ANCHOR_LFS_LOG_FORMAT"); v != "" {
 		c.Options.LogFormat = v
 	}

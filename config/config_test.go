@@ -536,6 +536,9 @@ func TestEnvOverrideInvalidValues(t *testing.T) {
 		{"ANCHOR_LFS_MAX_UPLOAD_SIZE", "abc", `ANCHOR_LFS_MAX_UPLOAD_SIZE "abc" must be a positive number of bytes`},
 		{"ANCHOR_LFS_MAX_UPLOAD_SIZE", "0", `ANCHOR_LFS_MAX_UPLOAD_SIZE "0" must be a positive number of bytes`},
 		{"ANCHOR_LFS_MAX_UPLOAD_SIZE", "-5", `ANCHOR_LFS_MAX_UPLOAD_SIZE "-5" must be a positive number of bytes`},
+		{"ANCHOR_LFS_RATE_LIMIT_TOKENS", "lots", `ANCHOR_LFS_RATE_LIMIT_TOKENS "lots" must be a positive whole number`},
+		{"ANCHOR_LFS_RATE_LIMIT_TOKENS", "0", `ANCHOR_LFS_RATE_LIMIT_TOKENS "0" must be a positive whole number`},
+		{"ANCHOR_LFS_URL_EXPIRY", "soon", `invalid url_expiry "soon": time: invalid duration "soon"`},
 		{"ANCHOR_LFS_S3_PRESIGNED_URLS", "yes", `ANCHOR_LFS_S3_PRESIGNED_URLS "yes" must be true or false`},
 		{"ANCHOR_LFS_S3_FORCE_PATH_STYLE", "on", `ANCHOR_LFS_S3_FORCE_PATH_STYLE "on" must be true or false`},
 		{"ANCHOR_LFS_ACCESS_LOG", "off", `ANCHOR_LFS_ACCESS_LOG "off" must be true or false`},
@@ -646,6 +649,10 @@ authentication = "none"
 	t.Setenv("ANCHOR_LFS_DATA_DIR", "/custom/data")
 	t.Setenv("ANCHOR_LFS_SHUTDOWN_TIMEOUT", "2m")
 	t.Setenv("ANCHOR_LFS_UPLOAD_IDLE_TIMEOUT", "0s")
+	t.Setenv("ANCHOR_LFS_RATE_LIMIT_TOKENS", "50")
+	t.Setenv("ANCHOR_LFS_RATE_LIMIT_WINDOW", "10s")
+	t.Setenv("ANCHOR_LFS_AUTH_CACHE_TTL", "5m")
+	t.Setenv("ANCHOR_LFS_URL_EXPIRY", "1h")
 
 	cfg, err := Load(path)
 	if err != nil {
@@ -663,6 +670,13 @@ authentication = "none"
 	}
 	if cfg.Options.UploadIdleTimeoutDuration != 0 {
 		t.Errorf("env override UploadIdleTimeoutDuration = %v, want 0", cfg.Options.UploadIdleTimeoutDuration)
+	}
+	if cfg.Options.RateLimitTokens != 50 || cfg.Options.RateLimitInterval != 10*time.Second {
+		t.Errorf("env override rate limit = %d per %v, want 50 per 10s", cfg.Options.RateLimitTokens, cfg.Options.RateLimitInterval)
+	}
+	if cfg.Options.AuthCacheDuration != 5*time.Minute || cfg.Options.URLExpiryDuration != time.Hour {
+		t.Errorf("env override AuthCacheDuration = %v, URLExpiryDuration = %v, want 5m and 1h",
+			cfg.Options.AuthCacheDuration, cfg.Options.URLExpiryDuration)
 	}
 }
 

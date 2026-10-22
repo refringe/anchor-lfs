@@ -65,7 +65,7 @@ The job display names above are the required status check contexts in the reposi
 
 ```
 .                           # Repository root (Go module: github.com/refringe/anchor-lfs)
-├── main.go                 # Entry point: config loading, wiring, route registration, temp file sweep, graceful shutdown
+├── main.go                 # Entry point: help/version subcommands, config loading, wiring, route registration, temp file sweep, graceful shutdown
 ├── main_test.go            # Integration tests for the full server
 ├── readiness.go            # GET /ready checks and the `anchor-lfs healthcheck` subcommand (Docker HEALTHCHECK)
 ├── readiness_test.go

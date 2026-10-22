@@ -1,6 +1,6 @@
 # Anchor LFS
 
-A lightweight, standalone [Git LFS](https://git-lfs.com/) server written in Go that authenticates users against GitHub organisation and repository permissions.
+A lightweight, standalone [Git LFS](https://git-lfs.com/) server written in Go that authenticates users against their GitHub repository permissions.
 
 ## Features
 
@@ -35,7 +35,8 @@ Requires Go 1.27 or later.
 # Build
 make build
 
-# Edit config.toml, then run:
+# Copy config.toml.example, edit it with your endpoints, then run:
+cp config.toml.example config.toml
 ./bin/anchor-lfs
 ```
 

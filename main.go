@@ -7,6 +7,7 @@ import (
 	"encoding/json/v2"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"os/signal"
@@ -35,8 +36,8 @@ var (
 )
 
 func main() {
-	if len(os.Args) > 1 && os.Args[1] == "healthcheck" {
-		os.Exit(runHealthcheck())
+	if len(os.Args) > 1 {
+		os.Exit(runCommand(os.Args[1:], os.Stdout, os.Stderr))
 	}
 
 	// Default: JSON to stderr.
@@ -245,6 +246,38 @@ func serverHandler(mux http.Handler, proxyTrust *middleware.ProxyTrust, accessLo
 		handler = middleware.Logging(handler, "/health", "/ready")
 	}
 	return proxyTrust.Handler(middleware.RequestID(handler))
+}
+
+// usage describes the command line.
+const usage = `Usage: anchor-lfs [command]
+
+Without a command, anchor-lfs starts the server, reading config.toml or the file named by ANCHOR_LFS_CONFIG.
+
+Commands:
+  healthcheck  Exit 0 if the local server's GET /ready answers 200, or 1 otherwise
+  version      Print the version, commit and build date
+  help         Print this help
+`
+
+// runCommand runs the command named by args[0] and returns the process exit code.
+func runCommand(args []string, stdout, stderr io.Writer) int {
+	if len(args) > 1 {
+		_, _ = fmt.Fprintf(stderr, "anchor-lfs: unexpected argument %q\n\n%s", args[1], usage)
+		return 2
+	}
+	switch args[0] {
+	case "healthcheck":
+		return runHealthcheck()
+	case "version":
+		_, _ = fmt.Fprintf(stdout, "anchor-lfs %s (commit %s, built %s)\n", version, commit, date)
+		return 0
+	case "help", "-h", "--help":
+		_, _ = fmt.Fprint(stdout, usage)
+		return 0
+	default:
+		_, _ = fmt.Fprintf(stderr, "anchor-lfs: unknown command %q\n\n%s", args[0], usage)
+		return 2
+	}
 }
 
 // configureLogging applies the configured log format and level to the global logger.
