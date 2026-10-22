@@ -93,7 +93,7 @@ The job display names above are the required status check contexts in the reposi
 ├── lfs/
 │   ├── handler.go          # HTTP handlers: Batch, Download, Upload, Verify, Lock CRUD
 │   ├── handler_test.go
-│   ├── batch.go            # Batch response building (processBatch)
+│   ├── batch.go            # Batch response building (processBatch, up to 16 objects looked up at once, in order)
 │   ├── idle.go             # Per-read idle deadline on upload bodies (upload_idle_timeout, 408 on a stall)
 │   ├── idle_test.go
 │   ├── models.go           # Request/response JSON structs
@@ -131,7 +131,7 @@ The job display names above are the required status check contexts in the reposi
 
 All endpoint routes are registered in `registerRoutes` in `main.go` with explicit HTTP methods on `http.ServeMux`. Batch and lock routes are rate limited per IP; the HMAC-signed transfer routes are not. Each endpoint prefix is configurable via `config.toml`:
 
-- `POST {prefix}/objects/batch`: Transfer negotiation
+- `POST {prefix}/objects/batch`: Transfer negotiation (objects looked up in storage 16 at a time)
 - `GET {prefix}/objects/{oid}`: Download (HMAC-signed URL)
 - `PUT {prefix}/objects/{oid}`: Upload (HMAC-signed URL)
 - `POST {prefix}/objects/verify`: Integrity verification (HMAC-signed URL)

@@ -12,11 +12,13 @@ import (
 	"io"
 	"io/fs"
 	"math"
+	"net/http"
 	"strings"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	v4 "github.com/aws/aws-sdk-go-v2/aws/signer/v4"
+	awshttp "github.com/aws/aws-sdk-go-v2/aws/transport/http"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
@@ -33,6 +35,9 @@ const (
 
 // s3MaxPutSize is the largest object S3 accepts in a single PUT request.
 const s3MaxPutSize int64 = 5 << 30
+
+// s3MaxIdleConns is the number of idle connections to the S3 endpoint kept open for reuse.
+const s3MaxIdleConns = 64
 
 // ErrObjectTooLarge is returned when an object is too large for a presigned upload.
 var ErrObjectTooLarge = errors.New("object too large for a presigned upload")
@@ -102,8 +107,13 @@ func NewS3(ctx context.Context, cfg S3Config) (Adapter, error) {
 
 // newS3Client builds an S3 client from the region, credentials, endpoint and path style in cfg.
 func newS3Client(ctx context.Context, cfg S3Config) (*s3.Client, error) {
-	var opts []func(*awsconfig.LoadOptions) error
-	opts = append(opts, awsconfig.WithRegion(cfg.Region))
+	httpClient := awshttp.NewBuildableClient().WithTransportOptions(func(t *http.Transport) {
+		t.MaxIdleConnsPerHost = s3MaxIdleConns
+	})
+	opts := []func(*awsconfig.LoadOptions) error{
+		awsconfig.WithRegion(cfg.Region),
+		awsconfig.WithHTTPClient(httpClient),
+	}
 
 	if cfg.AccessKeyID != "" && cfg.SecretAccessKey != "" {
 		opts = append(opts, awsconfig.WithCredentialsProvider(

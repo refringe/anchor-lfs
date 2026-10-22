@@ -5,43 +5,54 @@ import (
 	"fmt"
 	"io/fs"
 	"net/http"
+	"sync"
 
 	"github.com/refringe/anchor-lfs/middleware"
 	"github.com/refringe/anchor-lfs/storage"
 )
 
-func (h *Handler) processBatch(r *http.Request, req *BatchRequest, baseURL string) *BatchResponse {
-	resp := &BatchResponse{
-		Transfer: "basic",
-		Objects:  make([]ObjectResponse, 0, len(req.Objects)),
-		HashAlgo: "sha256",
-	}
+// batchConcurrency is the number of objects in one batch request that are looked up in storage at the same time.
+const batchConcurrency = 16
 
-	for _, obj := range req.Objects {
-		if err := r.Context().Err(); err != nil {
+// processBatch builds the response for every object in req, in request order, stopping early if the client goes away.
+func (h *Handler) processBatch(r *http.Request, req *BatchRequest, baseURL string) *BatchResponse {
+	objects := make([]ObjectResponse, len(req.Objects))
+	slots := make(chan struct{}, batchConcurrency)
+	var wg sync.WaitGroup
+	started := 0
+	for i, obj := range req.Objects {
+		slots <- struct{}{}
+		if r.Context().Err() != nil {
 			break
 		}
+		started++
+		wg.Go(func() {
+			defer func() { <-slots }()
+			objects[i] = h.processObject(r, req.Operation, obj, baseURL)
+		})
+	}
+	wg.Wait()
 
-		if msg := validateObject(obj); msg != "" {
-			resp.Objects = append(resp.Objects, ObjectResponse{
-				OID:  obj.OID,
-				Size: obj.Size,
-				Error: &ObjectError{
-					Code:    422,
-					Message: msg,
-				},
-			})
-			continue
-		}
-		switch req.Operation {
-		case opDownload:
-			resp.Objects = append(resp.Objects, h.processDownload(r, obj, baseURL))
-		case opUpload:
-			resp.Objects = append(resp.Objects, h.processUpload(r, obj, baseURL))
+	return &BatchResponse{
+		Transfer: "basic",
+		Objects:  objects[:started],
+		HashAlgo: "sha256",
+	}
+}
+
+// processObject builds the response for one object of a batch request.
+func (h *Handler) processObject(r *http.Request, operation string, obj Object, baseURL string) ObjectResponse {
+	if msg := validateObject(obj); msg != "" {
+		return ObjectResponse{
+			OID:   obj.OID,
+			Size:  obj.Size,
+			Error: &ObjectError{Code: 422, Message: msg},
 		}
 	}
-
-	return resp
+	if operation == opDownload {
+		return h.processDownload(r, obj, baseURL)
+	}
+	return h.processUpload(r, obj, baseURL)
 }
 
 func (h *Handler) processDownload(r *http.Request, obj Object, baseURL string) ObjectResponse {
