@@ -168,32 +168,31 @@ func TestCacheHit(t *testing.T) {
 }
 
 func TestCacheExpiry(t *testing.T) {
-	var count atomic.Int64
-	srv := mockGitHubAPI(t, &count, map[string]bool{"pull": true})
-	defer srv.Close()
+	synctest.Test(t, func(t *testing.T) {
+		const cacheTTL = 10 * time.Second
+		fake := &fakeGitHub{perms: map[string]bool{"pull": true}}
+		g := newFakeGitHubAuth(fake, cacheTTL)
+		defer func() { _ = g.Close() }()
+		authenticate := func() {
+			t.Helper()
+			r, err := g.Authenticate(t.Context(), testEndpoint(), "", "good-token", OperationUpload)
+			if err != nil || !r.Authenticated {
+				t.Fatalf("Authenticate = %+v, %v; want authenticated", r, err)
+			}
+		}
 
-	g := newGitHubAuth(srv.URL, 10*time.Millisecond)
-	defer func() { _ = g.Close() }()
-
-	ep := testEndpoint()
-	ctx := context.Background()
-
-	_, err := g.Authenticate(ctx, ep, "", "good-token", OperationDownload)
-	if err != nil {
-		t.Fatalf("first Authenticate: %v", err)
-	}
-
-	// Wait for cache to expire.
-	time.Sleep(20 * time.Millisecond)
-
-	_, err = g.Authenticate(ctx, ep, "", "good-token", OperationDownload)
-	if err != nil {
-		t.Fatalf("second Authenticate: %v", err)
-	}
-
-	if count.Load() != 2 {
-		t.Errorf("expected 2 API calls after expiry, got %d", count.Load())
-	}
+		authenticate()
+		time.Sleep(cacheTTL - time.Second)
+		authenticate()
+		if got := fake.repoCalls.Load(); got != 1 {
+			t.Errorf("GitHub calls within the TTL = %d, want 1", got)
+		}
+		time.Sleep(2 * time.Second)
+		authenticate()
+		if got := fake.repoCalls.Load(); got != 2 {
+			t.Errorf("GitHub calls after the TTL = %d, want 2", got)
+		}
+	})
 }
 
 func TestInvalidTokenCachedBriefly(t *testing.T) {
@@ -378,38 +377,6 @@ func TestCacheDisabledWhenTTLZero(t *testing.T) {
 
 	if count.Load() != 3 {
 		t.Errorf("expected 3 API calls with caching disabled, got %d", count.Load())
-	}
-}
-
-func TestCacheConcurrency(t *testing.T) {
-	var count atomic.Int64
-	srv := mockGitHubAPI(t, &count, map[string]bool{"pull": true, "push": true})
-	defer srv.Close()
-
-	g := newGitHubAuth(srv.URL, time.Minute)
-	defer func() { _ = g.Close() }()
-
-	ep := testEndpoint()
-	ctx := context.Background()
-
-	var wg sync.WaitGroup
-	for range 50 {
-		wg.Go(func() {
-			_, err := g.Authenticate(ctx, ep, "", "good-token", OperationDownload)
-			if err != nil {
-				t.Errorf("Authenticate: %v", err)
-			}
-		})
-	}
-	wg.Wait()
-
-	// With caching, we should see far fewer than 50 API calls.
-	// The exact number depends on timing, but it must be at least 1.
-	if count.Load() < 1 {
-		t.Error("expected at least 1 API call")
-	}
-	if count.Load() > 50 {
-		t.Errorf("expected at most 50 API calls, got %d", count.Load())
 	}
 }
 

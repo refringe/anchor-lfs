@@ -16,8 +16,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/refringe/anchor-lfs/auth"
-	"github.com/refringe/anchor-lfs/config"
 	"github.com/refringe/anchor-lfs/internal/testutil"
 	"github.com/refringe/anchor-lfs/storage"
 )
@@ -27,17 +25,9 @@ const testIdleTimeout = 300 * time.Millisecond
 // idleTimeoutServer starts a server storing uploads in store with testIdleTimeout and returns it and its signer.
 func idleTimeoutServer(t *testing.T, store storage.Adapter) (*httptest.Server, *URLSigner) {
 	t.Helper()
-	signer, err := NewURLSigner([]byte("test-secret-key-1234567890abcdef"), 10*time.Minute)
-	if err != nil {
-		t.Fatalf("NewURLSigner: %v", err)
-	}
-	h := NewHandler(HandlerConfig{
-		Endpoint:          &config.Endpoint{Name: "test", Path: "/org/repo", Visibility: "public", Authentication: "none"},
-		Store:             store,
-		Auth:              &auth.None{},
-		MaxUploadSize:     5 << 30,
-		Signer:            signer,
-		UploadIdleTimeout: testIdleTimeout,
+	h, _, signer := testHandler(t, func(cfg *HandlerConfig) {
+		cfg.Store = store
+		cfg.UploadIdleTimeout = testIdleTimeout
 	})
 	mux := http.NewServeMux()
 	mux.HandleFunc("PUT /org/repo/objects/{oid}", h.UploadHandler)

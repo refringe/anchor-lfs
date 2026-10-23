@@ -24,7 +24,8 @@ import (
 	"github.com/refringe/anchor-lfs/storage"
 )
 
-func testHandler(t *testing.T) (*Handler, *storage.Local, *URLSigner) {
+// testHandler returns a handler for a public /org/repo endpoint on local storage, with options applied to its config.
+func testHandler(t *testing.T, options ...func(*HandlerConfig)) (*Handler, *storage.Local, *URLSigner) {
 	t.Helper()
 	dir := t.TempDir()
 	store := storage.NewLocal(dir)
@@ -32,25 +33,26 @@ func testHandler(t *testing.T) (*Handler, *storage.Local, *URLSigner) {
 	if err != nil {
 		t.Fatalf("NewURLSigner: %v", err)
 	}
-	lockStore := NewFileLockStore(dir)
-	ep := &config.Endpoint{
-		Name:           "test",
-		URL:            "https://github.com/org/repo",
-		Path:           "/org/repo",
-		Visibility:     "public",
-		Authentication: "none",
-		GitHubOwner:    "org",
-		GitHubRepo:     "repo",
-	}
-	h := NewHandler(HandlerConfig{
-		Endpoint:      ep,
+	cfg := HandlerConfig{
+		Endpoint: &config.Endpoint{
+			Name:           "test",
+			URL:            "https://github.com/org/repo",
+			Path:           "/org/repo",
+			Visibility:     "public",
+			Authentication: "none",
+			GitHubOwner:    "org",
+			GitHubRepo:     "repo",
+		},
 		Store:         store,
 		Auth:          &auth.None{},
 		MaxUploadSize: 5 << 30,
 		Signer:        signer,
-		LockStore:     lockStore,
-	})
-	return h, store, signer
+		LockStore:     NewFileLockStore(dir),
+	}
+	for _, option := range options {
+		option(&cfg)
+	}
+	return NewHandler(cfg), store, cfg.Signer
 }
 
 // testBaseURL is the base URL of requests built by httptest.NewRequest from a path.
@@ -195,6 +197,71 @@ func TestDownloadSetsETag(t *testing.T) {
 	etag := dw.Header().Get("ETag")
 	if etag != `"`+oid+`"` {
 		t.Errorf("ETag = %q, want %q", etag, `"`+oid+`"`)
+	}
+}
+
+func TestDownloadRangeConditionalAndHead(t *testing.T) {
+	h, store, signer := testHandler(t)
+	data := []byte("0123456789")
+	oid := testutil.SHA256Hex(data)
+	if err := store.Put(context.Background(), h.endpoint.Path, oid, bytes.NewReader(data), int64(len(data))); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+
+	tests := []struct {
+		name       string
+		method     string
+		header     http.Header
+		wantStatus int
+		wantBody   string
+		wantHeader http.Header
+	}{
+		{
+			name:       "range",
+			method:     http.MethodGet,
+			header:     http.Header{"Range": {"bytes=2-5"}},
+			wantStatus: http.StatusPartialContent,
+			wantBody:   "2345",
+			wantHeader: http.Header{"Content-Range": {"bytes 2-5/10"}, "Content-Length": {"4"}},
+		},
+		{
+			name:       "matching etag",
+			method:     http.MethodGet,
+			header:     http.Header{"If-None-Match": {`"` + oid + `"`}},
+			wantStatus: http.StatusNotModified,
+		},
+		{
+			name:       "other etag",
+			method:     http.MethodGet,
+			header:     http.Header{"If-None-Match": {`"other"`}},
+			wantStatus: http.StatusOK,
+			wantBody:   string(data),
+		},
+		{
+			name:       "head",
+			method:     http.MethodHead,
+			wantStatus: http.StatusOK,
+			wantHeader: http.Header{"Content-Length": {"10"}, "Accept-Ranges": {"bytes"}},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			uri := signedURI(signer, opDownload, "/org/repo/objects/"+oid)
+			req := httptest.NewRequestWithContext(context.Background(), tt.method, uri, nil)
+			maps.Copy(req.Header, tt.header)
+			req.SetPathValue("oid", oid)
+			w := httptest.NewRecorder()
+			h.DownloadHandler(w, req)
+
+			if w.Code != tt.wantStatus || w.Body.String() != tt.wantBody {
+				t.Fatalf("got %d %q, want %d %q", w.Code, w.Body.String(), tt.wantStatus, tt.wantBody)
+			}
+			for key, want := range tt.wantHeader {
+				if got := w.Header().Get(key); got != want[0] {
+					t.Errorf("%s = %q, want %q", key, got, want[0])
+				}
+			}
+		})
 	}
 }
 
@@ -396,28 +463,7 @@ func TestUploadAcceptsAnyContentType(t *testing.T) {
 }
 
 func TestUploadTooLarge(t *testing.T) {
-	dir := t.TempDir()
-	store := storage.NewLocal(dir)
-	signer, err := NewURLSigner([]byte("test-secret-key-1234567890abcdef"), 10*time.Minute)
-	if err != nil {
-		t.Fatalf("NewURLSigner: %v", err)
-	}
-	lockStore := NewFileLockStore(dir)
-	ep := &config.Endpoint{
-		Name:           "test",
-		URL:            "https://github.com/org/repo",
-		Path:           "/org/repo",
-		Visibility:     "public",
-		Authentication: "none",
-	}
-	h := NewHandler(HandlerConfig{
-		Endpoint:      ep,
-		Store:         store,
-		Auth:          &auth.None{},
-		MaxUploadSize: 10, // 10-byte limit
-		Signer:        signer,
-		LockStore:     lockStore,
-	})
+	h, _, signer := testHandler(t, func(cfg *HandlerConfig) { cfg.MaxUploadSize = 10 })
 
 	oid := "deadbeef00000000000000000000000000000000000000000000000000000000"
 	uri := signedURI(signer, opUpload, "/org/repo/objects/"+oid)
@@ -622,28 +668,7 @@ func TestBatchTooLargeBody(t *testing.T) {
 }
 
 func TestBatchUploadRejectsOversizedObject(t *testing.T) {
-	dir := t.TempDir()
-	store := storage.NewLocal(dir)
-	signer, err := NewURLSigner([]byte("test-secret-key-1234567890abcdef"), 10*time.Minute)
-	if err != nil {
-		t.Fatalf("NewURLSigner: %v", err)
-	}
-	lockStore := NewFileLockStore(dir)
-	ep := &config.Endpoint{
-		Name:           "test",
-		URL:            "https://github.com/org/repo",
-		Path:           "/org/repo",
-		Visibility:     "public",
-		Authentication: "none",
-	}
-	h := NewHandler(HandlerConfig{
-		Endpoint:      ep,
-		Store:         store,
-		Auth:          &auth.None{},
-		MaxUploadSize: 1024, // 1 KiB limit
-		Signer:        signer,
-		LockStore:     lockStore,
-	})
+	h, _, _ := testHandler(t, func(cfg *HandlerConfig) { cfg.MaxUploadSize = 1024 })
 
 	body := BatchRequest{
 		Operation: "upload",
@@ -1077,28 +1102,11 @@ func TestTransferURLsAreBoundToOperationAndHost(t *testing.T) {
 }
 
 func TestUploadRejectsExpiredURL(t *testing.T) {
-	dir := t.TempDir()
-	store := storage.NewLocal(dir)
 	expiredSigner, err := NewURLSigner([]byte("test-secret-key-1234567890abcdef"), -1*time.Second)
 	if err != nil {
 		t.Fatalf("NewURLSigner: %v", err)
 	}
-	lockStore := NewFileLockStore(dir)
-	ep := &config.Endpoint{
-		Name:           "test",
-		URL:            "https://github.com/org/repo",
-		Path:           "/org/repo",
-		Visibility:     "public",
-		Authentication: "none",
-	}
-	h := NewHandler(HandlerConfig{
-		Endpoint:      ep,
-		Store:         store,
-		Auth:          &auth.None{},
-		MaxUploadSize: 5 << 30,
-		Signer:        expiredSigner,
-		LockStore:     lockStore,
-	})
+	h, _, _ := testHandler(t, func(cfg *HandlerConfig) { cfg.Signer = expiredSigner })
 
 	oid := "deadbeef00000000000000000000000000000000000000000000000000000000"
 	uri := signedURI(expiredSigner, opUpload, "/org/repo/objects/"+oid)
@@ -1301,29 +1309,7 @@ func TestBatchUploadPresigned(t *testing.T) {
 }
 
 func TestBatchUploadInsufficientStorage(t *testing.T) {
-	dir := t.TempDir()
-	realStore := storage.NewLocal(dir)
-	store := &spaceAwareStore{Adapter: realStore, avail: 100} // Only 100 bytes available.
-	signer, err := NewURLSigner([]byte("test-secret-key-1234567890abcdef"), 10*time.Minute)
-	if err != nil {
-		t.Fatalf("NewURLSigner: %v", err)
-	}
-	lockStore := NewFileLockStore(dir)
-	ep := &config.Endpoint{
-		Name:           "test",
-		URL:            "https://github.com/org/repo",
-		Path:           "/org/repo",
-		Visibility:     "public",
-		Authentication: "none",
-	}
-	h := NewHandler(HandlerConfig{
-		Endpoint:      ep,
-		Store:         store,
-		Auth:          &auth.None{},
-		MaxUploadSize: 5 << 30,
-		Signer:        signer,
-		LockStore:     lockStore,
-	})
+	h, _, _ := testHandler(t, func(cfg *HandlerConfig) { cfg.Store = &spaceAwareStore{Adapter: cfg.Store, avail: 100} })
 
 	body := BatchRequest{
 		Operation: "upload",
@@ -1345,29 +1331,7 @@ func TestBatchUploadInsufficientStorage(t *testing.T) {
 }
 
 func TestBatchUploadSufficientStorage(t *testing.T) {
-	dir := t.TempDir()
-	realStore := storage.NewLocal(dir)
-	store := &spaceAwareStore{Adapter: realStore, avail: 1000}
-	signer, err := NewURLSigner([]byte("test-secret-key-1234567890abcdef"), 10*time.Minute)
-	if err != nil {
-		t.Fatalf("NewURLSigner: %v", err)
-	}
-	lockStore := NewFileLockStore(dir)
-	ep := &config.Endpoint{
-		Name:           "test",
-		URL:            "https://github.com/org/repo",
-		Path:           "/org/repo",
-		Visibility:     "public",
-		Authentication: "none",
-	}
-	h := NewHandler(HandlerConfig{
-		Endpoint:      ep,
-		Store:         store,
-		Auth:          &auth.None{},
-		MaxUploadSize: 5 << 30,
-		Signer:        signer,
-		LockStore:     lockStore,
-	})
+	h, _, _ := testHandler(t, func(cfg *HandlerConfig) { cfg.Store = &spaceAwareStore{Adapter: cfg.Store, avail: 1000} })
 
 	body := BatchRequest{
 		Operation: "upload",
@@ -1433,28 +1397,8 @@ func TestBatchUploadSpaceCountsOnlyMissingObjects(t *testing.T) {
 }
 
 func TestBatchUploadSpaceCheckFailsOpen(t *testing.T) {
-	dir := t.TempDir()
-	realStore := storage.NewLocal(dir)
-	store := &spaceAwareStore{Adapter: realStore, availErr: errors.New("statfs failed")}
-	signer, err := NewURLSigner([]byte("test-secret-key-1234567890abcdef"), 10*time.Minute)
-	if err != nil {
-		t.Fatalf("NewURLSigner: %v", err)
-	}
-	lockStore := NewFileLockStore(dir)
-	ep := &config.Endpoint{
-		Name:           "test",
-		URL:            "https://github.com/org/repo",
-		Path:           "/org/repo",
-		Visibility:     "public",
-		Authentication: "none",
-	}
-	h := NewHandler(HandlerConfig{
-		Endpoint:      ep,
-		Store:         store,
-		Auth:          &auth.None{},
-		MaxUploadSize: 5 << 30,
-		Signer:        signer,
-		LockStore:     lockStore,
+	h, _, _ := testHandler(t, func(cfg *HandlerConfig) {
+		cfg.Store = &spaceAwareStore{Adapter: cfg.Store, availErr: errors.New("statfs failed")}
 	})
 
 	body := BatchRequest{

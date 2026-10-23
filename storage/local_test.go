@@ -158,17 +158,15 @@ func TestSanitizeEndpointRejectsTraversal(t *testing.T) {
 func TestFilePathSharding(t *testing.T) {
 	store := NewLocal("/data")
 	oid := "4d7a214614ab2935c943f9e0ff69d22eadbb8f32b1258daaa5e2ca24d17e2393"
-	got, err := store.filePath("/org/repo", oid)
-	if err != nil {
-		t.Fatalf("filePath: %v", err)
-	}
-	want := "/data/org_repo/4d/7a/4d7a214614ab2935c943f9e0ff69d22eadbb8f32b1258daaa5e2ca24d17e2393"
+	want := filepath.Join("/data", "org_repo", "4d", "7a", oid)
 
-	// Use filepath separator-agnostic comparison.
-	if got != want {
-		// On non-Unix this may differ; check contains the sharding dirs.
-		if !strings.Contains(got, "4d") || !strings.Contains(got, "7a") {
-			t.Errorf("filePath sharding incorrect: %s", got)
+	for _, input := range []string{oid, strings.ToUpper(oid)} {
+		got, err := store.filePath("/org/repo", input)
+		if err != nil {
+			t.Fatalf("filePath(%q): %v", input, err)
+		}
+		if got != want {
+			t.Errorf("filePath(%q) = %q, want %q", input, got, want)
 		}
 	}
 }

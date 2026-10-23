@@ -214,12 +214,9 @@ func (h *Handler) DownloadHandler(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/octet-stream")
 
-	// OID is the SHA-256 hash — a perfect, immutable ETag.
 	w.Header().Set("ETag", `"`+oid+`"`)
 
-	// Use http.ServeContent when the reader supports seeking. This enables
-	// range requests (Accept-Ranges: bytes) for resumable downloads and
-	// conditional requests (If-None-Match) via the ETag header set above.
+	// Seekable readers go through http.ServeContent, which answers Range, HEAD and If-None-Match requests.
 	if rs, ok := reader.(io.ReadSeeker); ok {
 		http.ServeContent(w, r, "", time.Time{}, rs)
 		return
