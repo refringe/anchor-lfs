@@ -1194,6 +1194,82 @@ authentication = "none"
 	}
 }
 
+// writeS3Config writes a config using the S3 backend with storageLines added to its [storage] table.
+func writeS3Config(t *testing.T, storageLines string) string {
+	t.Helper()
+	return writeConfig(t, `
+[storage]
+backend = "s3"
+s3_bucket = "my-bucket"
+s3_region = "us-east-1"
+`+storageLines+`
+
+[[endpoints]]
+name = "Test"
+url = "https://github.com/org/repo"
+endpoint = "/org/repo"
+visibility = "public"
+authentication = "none"
+`)
+}
+
+func TestStorageS3Prefix(t *testing.T) {
+	tests := []struct {
+		name    string
+		line    string
+		want    string
+		wantErr string
+	}{
+		{name: "unset", line: "", want: "lfs/"},
+		{name: "bucket root", line: `s3_prefix = ""`, want: ""},
+		{name: "custom", line: `s3_prefix = "custom/"`, want: "custom/"},
+		{name: "nested", line: `s3_prefix = "a/b/"`, want: "a/b/"},
+		{name: "no trailing slash", line: `s3_prefix = "lfs"`, wantErr: `must end with "/" (for example "lfs/")`},
+		{name: "leading slash", line: `s3_prefix = "/lfs/"`, wantErr: `must not start with "/"`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg, err := Load(writeS3Config(t, tt.line))
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("Load error = %v, want one containing %q", err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			if cfg.Storage.S3Prefix != tt.want {
+				t.Errorf("S3Prefix = %q, want %q", cfg.Storage.S3Prefix, tt.want)
+			}
+		})
+	}
+}
+
+func TestStorageS3CredentialsSetTogether(t *testing.T) {
+	tests := []struct {
+		name    string
+		lines   string
+		wantErr bool
+	}{
+		{"neither", "", false},
+		{"both", "s3_access_key_id = \"AKID\"\ns3_secret_access_key = \"secret\"", false},
+		{"key only", `s3_access_key_id = "AKID"`, true},
+		{"secret only", `s3_secret_access_key = "secret"`, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := Load(writeS3Config(t, tt.lines))
+			if tt.wantErr && (err == nil || !strings.Contains(err.Error(), "must be set together")) {
+				t.Errorf("Load error = %v, want one saying the key and secret must be set together", err)
+			}
+			if !tt.wantErr && err != nil {
+				t.Errorf("Load: %v", err)
+			}
+		})
+	}
+}
+
 func TestStorageS3MissingBucket(t *testing.T) {
 	path := writeConfig(t, `
 [storage]

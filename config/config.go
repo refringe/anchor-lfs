@@ -183,7 +183,7 @@ func Load(path string) (*Config, error) {
 			strings.Join(unknown, ", "))
 	}
 
-	cfg.applyDefaults()
+	cfg.applyDefaults(md)
 
 	problems := cfg.applyEnvOverrides()
 	problems = append(problems, cfg.parseRateLimitWindow(), cfg.parseAuthCacheTTL(), cfg.parseURLExpiry(), cfg.parseShutdownTimeout(),
@@ -234,7 +234,7 @@ func unrecognisedKeys(md toml.MetaData) []string {
 	})
 }
 
-func (c *Config) applyDefaults() {
+func (c *Config) applyDefaults(md toml.MetaData) {
 	if c.Options.ListenAddress == "" {
 		c.Options.ListenAddress = ":5420"
 	}
@@ -283,7 +283,7 @@ func (c *Config) applyDefaults() {
 	if c.Storage.Backend == "" {
 		c.Storage.Backend = StorageLocal
 	}
-	if c.Storage.S3Prefix == "" {
+	if !md.IsDefined("storage", "s3_prefix") {
 		c.Storage.S3Prefix = "lfs/"
 	}
 }
@@ -491,6 +491,14 @@ func (c *Config) validateStorage() []error {
 			if err != nil || u.Scheme == "" || u.Host == "" {
 				problems = append(problems, fmt.Errorf("s3_endpoint %q is not a valid URL", c.Storage.S3Endpoint))
 			}
+		}
+		if prefix := c.Storage.S3Prefix; strings.HasPrefix(prefix, "/") {
+			problems = append(problems, fmt.Errorf(`s3_prefix %q must not start with "/"`, prefix))
+		} else if prefix != "" && !strings.HasSuffix(prefix, "/") {
+			problems = append(problems, fmt.Errorf(`s3_prefix %q must end with "/" (for example %q)`, prefix, prefix+"/"))
+		}
+		if (c.Storage.S3AccessKeyID == "") != (c.Storage.S3SecretAccessKey == "") {
+			problems = append(problems, fmt.Errorf("s3_access_key_id and s3_secret_access_key must be set together"))
 		}
 		return problems
 	default:

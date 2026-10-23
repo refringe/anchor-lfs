@@ -77,6 +77,7 @@ signing_key = "`+signingKey+`"
 backend = "s3"
 s3_bucket = "lfs"
 s3_region = "eu-west-1"
+s3_access_key_id = "AKID"
 s3_secret_access_key = "`+secret+`"
 `+cliEndpoint)
 
