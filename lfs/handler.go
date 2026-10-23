@@ -156,33 +156,35 @@ func (h *Handler) BatchHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// For uploads, check available disk space before processing objects.
-	// This rejects the entire batch early with 507 if the filesystem cannot
-	// accommodate the requested uploads, rather than failing individual
-	// transfers later.
-	if req.Operation == opUpload {
-		var totalSize uint64
-		for _, obj := range req.Objects {
-			if obj.Size > 0 {
-				totalSize += uint64(obj.Size)
-			}
-		}
-		if totalSize > 0 {
-			avail, err := h.store.AvailableSpace(r.Context())
-			if err != nil {
-				middleware.Logger(r.Context()).Warn().Err(err).Msg("checking available storage space")
-				// Fail open — if we can't check, let individual uploads handle it.
-			} else if totalSize > avail {
-				writeError(w, r, http.StatusInsufficientStorage, "insufficient storage for requested uploads")
-				return
-			}
-		}
-	}
-
 	base := h.requestBaseURL(r)
 	resp := h.processBatch(r, &req, base)
 
+	if req.Operation == opUpload && !h.hasSpaceFor(r, resp.Objects) {
+		writeError(w, r, http.StatusInsufficientStorage, "insufficient storage for requested uploads")
+		return
+	}
+
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// hasSpaceFor reports whether storage can hold every object given an upload action, or true if it cannot tell.
+func (h *Handler) hasSpaceFor(r *http.Request, objects []ObjectResponse) bool {
+	var needed uint64
+	for _, obj := range objects {
+		if _, ok := obj.Actions[opUpload]; ok {
+			needed += min(uint64(obj.Size), math.MaxUint64-needed)
+		}
+	}
+	if needed == 0 {
+		return true
+	}
+
+	avail, err := h.store.AvailableSpace(r.Context())
+	if err != nil {
+		middleware.Logger(r.Context()).Warn().Err(err).Msg("checking available storage space")
+		return true
+	}
+	return needed <= avail
 }
 
 // DownloadHandler handles GET /objects/{oid} requests.

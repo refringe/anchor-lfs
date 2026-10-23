@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -1261,6 +1262,50 @@ func TestBatchUploadSufficientStorage(t *testing.T) {
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestBatchUploadSpaceCountsOnlyMissingObjects(t *testing.T) {
+	stored := bytes.Repeat([]byte("s"), 1000)
+	storedOID := testutil.SHA256Hex(stored)
+	missing := func(i int) string { return testutil.SHA256Hex(fmt.Appendf(nil, "missing %d", i)) }
+
+	tests := []struct {
+		name    string
+		objects []Object
+		avail   uint64
+		want    int
+	}{
+		{"stored objects need no space", []Object{{OID: storedOID, Size: 1000}}, 1, http.StatusOK},
+		{"stored objects are not counted", []Object{{OID: storedOID, Size: 1000}, {OID: missing(0), Size: 50}}, 100, http.StatusOK},
+		{"missing objects need more than is free", []Object{{OID: storedOID, Size: 1000}, {OID: missing(0), Size: 150}}, 100, http.StatusInsufficientStorage},
+		{
+			"sizes that would wrap the sum",
+			[]Object{{OID: missing(0), Size: math.MaxInt64}, {OID: missing(1), Size: math.MaxInt64}, {OID: missing(2), Size: math.MaxInt64}},
+			math.MaxUint64 - 1,
+			http.StatusInsufficientStorage,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h, local, _ := testHandler(t)
+			if err := local.Put(context.Background(), "/org/repo", storedOID, bytes.NewReader(stored), int64(len(stored))); err != nil {
+				t.Fatal(err)
+			}
+			h.store = &spaceAwareStore{Adapter: local, avail: tt.avail}
+			h.maxUploadSize = math.MaxInt64
+
+			b, _ := json.Marshal(BatchRequest{Operation: opUpload, Objects: tt.objects})
+			req := httptest.NewRequestWithContext(context.Background(), "POST", "/org/repo/objects/batch", bytes.NewReader(b))
+			req.Header.Set("Accept", lfsMediaType)
+			req.Header.Set("Content-Type", lfsMediaType)
+			w := httptest.NewRecorder()
+			h.BatchHandler(w, req)
+
+			if w.Code != tt.want {
+				t.Fatalf("status %d, want %d: %s", w.Code, tt.want, w.Body.String())
+			}
+		})
 	}
 }
 
