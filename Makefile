@@ -7,7 +7,7 @@ LDFLAGS := -s -w -X main.version=$(VERSION) -X main.commit=$(COMMIT) -X main.dat
 
 # Build
 build:
-	go build -trimpath -ldflags="$(LDFLAGS)" -o bin/anchor-lfs .
+	CGO_ENABLED=0 go build -trimpath -ldflags="$(LDFLAGS)" -o bin/anchor-lfs .
 
 run: build
 	./bin/anchor-lfs
