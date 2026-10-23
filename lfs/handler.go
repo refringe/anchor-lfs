@@ -97,9 +97,7 @@ func NewHandler(cfg HandlerConfig) *Handler {
 
 // BatchHandler handles POST /objects/batch requests.
 func (h *Handler) BatchHandler(w http.ResponseWriter, r *http.Request) {
-	// Validate Accept header per spec — clients must send the LFS media type.
-	accept, _, _ := mime.ParseMediaType(r.Header.Get("Accept"))
-	if accept != lfsMediaType {
+	if !acceptsLFSMediaType(r.Header.Get("Accept")) {
 		writeError(w, r, http.StatusNotAcceptable, "expected Accept: "+lfsMediaType)
 		return
 	}
@@ -125,7 +123,7 @@ func (h *Handler) BatchHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if len(req.Objects) > maxObjectsPerBatch {
-		writeError(w, r, http.StatusUnprocessableEntity, fmt.Sprintf("batch request contains %d objects; maximum is %d", len(req.Objects), maxObjectsPerBatch))
+		writeError(w, r, http.StatusRequestEntityTooLarge, fmt.Sprintf("batch request contains %d objects; maximum is %d", len(req.Objects), maxObjectsPerBatch))
 		return
 	}
 
@@ -347,12 +345,12 @@ func (h *Handler) VerifyHandler(w http.ResponseWriter, r *http.Request) {
 
 // CreateLockHandler handles POST /{endpoint}/locks requests.
 func (h *Handler) CreateLockHandler(w http.ResponseWriter, r *http.Request) {
-	if !requireLFSMediaType(w, r) {
+	result, ok := h.requireAuthResult(w, r, auth.OperationUpload)
+	if !ok {
 		return
 	}
 
-	result, ok := h.requireAuthResult(w, r, auth.OperationUpload)
-	if !ok {
+	if !requireLFSMediaType(w, r) {
 		return
 	}
 
@@ -390,13 +388,12 @@ func (h *Handler) CreateLockHandler(w http.ResponseWriter, r *http.Request) {
 // ListLocksHandler handles GET /{endpoint}/locks requests.
 // Only Accept is validated (not Content-Type) because GET requests have no body.
 func (h *Handler) ListLocksHandler(w http.ResponseWriter, r *http.Request) {
-	accept, _, _ := mime.ParseMediaType(r.Header.Get("Accept"))
-	if accept != lfsMediaType {
-		writeError(w, r, http.StatusNotAcceptable, "expected Accept: "+lfsMediaType)
+	if !h.requireAuth(w, r, auth.OperationDownload) {
 		return
 	}
 
-	if _, ok := h.requireAuthResult(w, r, auth.OperationDownload); !ok {
+	if !acceptsLFSMediaType(r.Header.Get("Accept")) {
+		writeError(w, r, http.StatusNotAcceptable, "expected Accept: "+lfsMediaType)
 		return
 	}
 
@@ -429,12 +426,12 @@ func (h *Handler) ListLocksHandler(w http.ResponseWriter, r *http.Request) {
 
 // VerifyLocksHandler handles POST /{endpoint}/locks/verify requests.
 func (h *Handler) VerifyLocksHandler(w http.ResponseWriter, r *http.Request) {
-	if !requireLFSMediaType(w, r) {
+	result, ok := h.requireAuthResult(w, r, auth.OperationUpload)
+	if !ok {
 		return
 	}
 
-	result, ok := h.requireAuthResult(w, r, auth.OperationUpload)
-	if !ok {
+	if !requireLFSMediaType(w, r) {
 		return
 	}
 
@@ -475,12 +472,12 @@ func (h *Handler) VerifyLocksHandler(w http.ResponseWriter, r *http.Request) {
 
 // UnlockHandler handles POST /{endpoint}/locks/{id}/unlock requests.
 func (h *Handler) UnlockHandler(w http.ResponseWriter, r *http.Request) {
-	if !requireLFSMediaType(w, r) {
+	result, ok := h.requireAuthResult(w, r, auth.OperationUpload)
+	if !ok {
 		return
 	}
 
-	result, ok := h.requireAuthResult(w, r, auth.OperationUpload)
-	if !ok {
+	if !requireLFSMediaType(w, r) {
 		return
 	}
 
@@ -573,8 +570,7 @@ func (h *Handler) requireAuthResult(w http.ResponseWriter, r *http.Request, op a
 // requireLFSMediaType validates that both Accept and Content-Type headers
 // are set to the LFS media type. Returns false and writes an error if not.
 func requireLFSMediaType(w http.ResponseWriter, r *http.Request) bool {
-	accept, _, _ := mime.ParseMediaType(r.Header.Get("Accept"))
-	if accept != lfsMediaType {
+	if !acceptsLFSMediaType(r.Header.Get("Accept")) {
 		writeError(w, r, http.StatusNotAcceptable, "expected Accept: "+lfsMediaType)
 		return false
 	}
@@ -584,6 +580,23 @@ func requireLFSMediaType(w http.ResponseWriter, r *http.Request) bool {
 		return false
 	}
 	return true
+}
+
+// acceptsLFSMediaType reports whether an Accept header lists the Git LFS media type, application/* or */* without q=0.
+func acceptsLFSMediaType(accept string) bool {
+	for entry := range strings.SplitSeq(accept, ",") {
+		mediaType, params, err := mime.ParseMediaType(entry)
+		if err != nil {
+			continue
+		}
+		if q, err := strconv.ParseFloat(params["q"], 64); err == nil && q == 0 {
+			continue
+		}
+		if mediaType == lfsMediaType || mediaType == "application/*" || mediaType == "*/*" {
+			return true
+		}
+	}
+	return false
 }
 
 func (h *Handler) authenticate(r *http.Request, op auth.Operation) (auth.Result, error) {

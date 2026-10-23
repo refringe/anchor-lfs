@@ -119,13 +119,19 @@ func (h *Handler) processUpload(r *http.Request, obj Object, baseURL string) Obj
 	}
 
 	// If the object already exists, omit actions to signal the server has it.
-	exists, err := h.store.Exists(r.Context(), h.endpoint.Path, obj.OID)
-	if err != nil {
+	size, err := h.store.Size(r.Context(), h.endpoint.Path, obj.OID)
+	switch {
+	case err == nil && size == obj.Size:
+		return resp
+	case err == nil:
+		resp.Error = &ObjectError{
+			Code:    422,
+			Message: fmt.Sprintf("object size mismatch: expected %d, found %d", obj.Size, size),
+		}
+		return resp
+	case !errors.Is(err, fs.ErrNotExist):
 		middleware.Logger(r.Context()).Error().Err(err).Str("oid", obj.OID).Msg("checking object existence")
 		resp.Error = &ObjectError{Code: 500, Message: msgInternalError}
-		return resp
-	}
-	if exists {
 		return resp
 	}
 

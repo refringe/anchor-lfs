@@ -1737,7 +1737,98 @@ func TestBatchRejectsTooManyObjects(t *testing.T) {
 
 	h.BatchHandler(w, req)
 
-	if w.Code != http.StatusUnprocessableEntity {
-		t.Fatalf("expected 422, got %d", w.Code)
+	if w.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("expected 413, got %d", w.Code)
+	}
+}
+
+func TestAcceptsLFSMediaType(t *testing.T) {
+	tests := []struct {
+		accept string
+		want   bool
+	}{
+		{lfsMediaType, true},
+		{lfsMediaType + "; charset=utf-8", true},
+		{lfsMediaType + ", */*", true},
+		{"application/json, " + lfsMediaType, true},
+		{"application/*", true},
+		{"*/*", true},
+		{"", false},
+		{"application/json", false},
+		{"text/html, " + lfsMediaType + ";q=0", false},
+		{lfsMediaType + ";q=0.0, text/html", false},
+		{"not a media type", false},
+	}
+	for _, tt := range tests {
+		if got := acceptsLFSMediaType(tt.accept); got != tt.want {
+			t.Errorf("acceptsLFSMediaType(%q) = %t, want %t", tt.accept, got, tt.want)
+		}
+	}
+}
+
+func TestBatchAcceptsAcceptList(t *testing.T) {
+	h, _, _ := testHandler(t)
+	b, _ := json.Marshal(BatchRequest{Operation: opDownload, Objects: []Object{{OID: fmt.Sprintf("%064x", 1), Size: 1}}})
+	req := httptest.NewRequestWithContext(context.Background(), "POST", "/org/repo/objects/batch", bytes.NewReader(b))
+	req.Header.Set("Accept", lfsMediaType+", */*")
+	req.Header.Set("Content-Type", lfsMediaType)
+	w := httptest.NewRecorder()
+
+	h.BatchHandler(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestBatchUploadRejectsStoredObjectOfAnotherSize(t *testing.T) {
+	h, store, _ := testHandler(t)
+	content := []byte("stored content")
+	oid := testutil.SHA256Hex(content)
+	if err := store.Put(context.Background(), "/org/repo", oid, bytes.NewReader(content), int64(len(content))); err != nil {
+		t.Fatal(err)
+	}
+	objects := []Object{{OID: oid, Size: int64(len(content)) + 1}, {OID: oid, Size: int64(len(content))}}
+	r := httptest.NewRequestWithContext(context.Background(), "POST", "/org/repo/objects/batch", nil)
+
+	resp := h.processBatch(r, &BatchRequest{Operation: opUpload, Objects: objects}, "http://test")
+
+	if got := resp.Objects[0].Error; got == nil || got.Code != http.StatusUnprocessableEntity {
+		t.Errorf("wrong declared size: error = %+v, want a 422", got)
+	}
+	if got := resp.Objects[1]; got.Error != nil || got.Actions != nil {
+		t.Errorf("matching declared size: error = %+v, actions = %v, want neither", got.Error, got.Actions)
+	}
+}
+
+// noCredentialsAuth is an authenticator that treats every request as carrying no valid credentials.
+type noCredentialsAuth struct{}
+
+func (noCredentialsAuth) Authenticate(_ context.Context, _ *config.Endpoint, _, _ string, _ auth.Operation) (auth.Result, error) {
+	return auth.Result{}, nil
+}
+
+func TestLockHandlersAuthenticateBeforeCheckingTheRequest(t *testing.T) {
+	h, _, _ := testHandler(t)
+	h.auth = noCredentialsAuth{}
+
+	handlers := map[string]http.HandlerFunc{
+		"create": h.CreateLockHandler,
+		"list":   h.ListLocksHandler,
+		"verify": h.VerifyLocksHandler,
+		"unlock": h.UnlockHandler,
+	}
+	for name, handler := range handlers {
+		t.Run(name, func(t *testing.T) {
+			req := httptest.NewRequestWithContext(context.Background(), "POST", "/org/repo/locks", strings.NewReader("not json"))
+			req.Header.Set("Accept", "text/html")
+			w := httptest.NewRecorder()
+
+			handler(w, req)
+
+			if w.Code != http.StatusUnauthorized {
+				t.Errorf("expected 401, got %d", w.Code)
+			}
+		})
 	}
 }
