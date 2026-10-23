@@ -263,7 +263,7 @@ func (h *Handler) UploadHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Enforce the upload size limit at the reader level.
-	body := withIdleTimeout(w, http.MaxBytesReader(w, r.Body, h.maxUploadSize), h.uploadIdleTimeout)
+	body := &readErrorRecorder{reader: withIdleTimeout(w, http.MaxBytesReader(w, r.Body, h.maxUploadSize), h.uploadIdleTimeout)}
 
 	if err := h.store.Put(r.Context(), h.endpoint.Path, oid, body, r.ContentLength); err != nil {
 		if errors.Is(err, os.ErrDeadlineExceeded) {
@@ -285,6 +285,11 @@ func (h *Handler) UploadHandler(w http.ResponseWriter, r *http.Request) {
 		}
 		if errors.Is(err, storage.ErrObjectTooLarge) {
 			writeError(w, r, http.StatusRequestEntityTooLarge, "object exceeds the maximum size storage accepts without a Content-Length")
+			return
+		}
+		if body.err != nil || r.Context().Err() != nil {
+			middleware.Logger(r.Context()).Warn().Err(err).Str("oid", oid).Msg("upload interrupted")
+			writeError(w, r, http.StatusBadRequest, "upload interrupted before the object was complete")
 			return
 		}
 		middleware.Logger(r.Context()).Error().Err(err).Str("oid", oid).Msg("storing object")

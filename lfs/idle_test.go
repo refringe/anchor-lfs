@@ -83,9 +83,9 @@ func (s *pausingStore) Put(ctx context.Context, _, _ string, reader io.Reader, _
 	return ctx.Err()
 }
 
-func TestUploadStalledClientTimesOut(t *testing.T) {
-	dir := t.TempDir()
-	srv, signer := idleTimeoutServer(t, storage.NewLocal(dir))
+// putPartialBody sends 10 bytes of a 1000-byte upload over a raw connection, closing its write side if closeWrite.
+func putPartialBody(t *testing.T, srv *httptest.Server, signer *URLSigner, closeWrite bool) *http.Response {
+	t.Helper()
 	oid := testutil.SHA256Hex(bytes.Repeat([]byte("x"), 1000))
 	href := signer.Sign(opUpload, srv.URL, "/org/repo/objects/"+oid).Href
 
@@ -94,30 +94,37 @@ func TestUploadStalledClientTimesOut(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer func() { _ = conn.Close() }()
+	t.Cleanup(func() { _ = conn.Close() })
 	if err := conn.SetDeadline(time.Now().Add(5 * time.Second)); err != nil {
 		t.Fatal(err)
 	}
-	start := time.Now()
 	request := "PUT " + strings.TrimPrefix(href, srv.URL) + " HTTP/1.1\r\nHost: " + srv.Listener.Addr().String() + "\r\nContent-Length: 1000\r\n\r\n" +
 		strings.Repeat("x", 10)
 	if _, err := conn.Write([]byte(request)); err != nil {
 		t.Fatal(err)
+	}
+	if closeWrite {
+		tcpConn, ok := conn.(*net.TCPConn)
+		if !ok {
+			t.Fatalf("connection is a %T, want *net.TCPConn", conn)
+		}
+		if err := tcpConn.CloseWrite(); err != nil {
+			t.Fatal(err)
+		}
 	}
 
 	resp, err := http.ReadResponse(bufio.NewReader(conn), nil)
 	if err != nil {
 		t.Fatalf("reading response: %v", err)
 	}
-	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode != http.StatusRequestTimeout {
-		t.Errorf("status = %d, want %d", resp.StatusCode, http.StatusRequestTimeout)
-	}
-	if elapsed := time.Since(start); elapsed > 3*time.Second {
-		t.Errorf("stalled upload took %v to time out, want about %v", elapsed, testIdleTimeout)
-	}
+	t.Cleanup(func() { _ = resp.Body.Close() })
+	return resp
+}
 
-	err = filepath.WalkDir(dir, func(path string, entry fs.DirEntry, err error) error {
+// assertNoTempFiles fails the test if any upload temp file remains under dir.
+func assertNoTempFiles(t *testing.T, dir string) {
+	t.Helper()
+	err := filepath.WalkDir(dir, func(path string, entry fs.DirEntry, err error) error {
 		if err == nil && strings.HasPrefix(entry.Name(), storage.TempFilePrefix) {
 			t.Errorf("temporary file %s left behind", path)
 		}
@@ -126,6 +133,32 @@ func TestUploadStalledClientTimesOut(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+}
+
+func TestUploadStalledClientTimesOut(t *testing.T) {
+	dir := t.TempDir()
+	srv, signer := idleTimeoutServer(t, storage.NewLocal(dir))
+
+	start := time.Now()
+	resp := putPartialBody(t, srv, signer, false)
+	if resp.StatusCode != http.StatusRequestTimeout {
+		t.Errorf("status = %d, want %d", resp.StatusCode, http.StatusRequestTimeout)
+	}
+	if elapsed := time.Since(start); elapsed > 3*time.Second {
+		t.Errorf("stalled upload took %v to time out, want about %v", elapsed, testIdleTimeout)
+	}
+	assertNoTempFiles(t, dir)
+}
+
+func TestUploadEndingEarlyIsAClientError(t *testing.T) {
+	dir := t.TempDir()
+	srv, signer := idleTimeoutServer(t, storage.NewLocal(dir))
+
+	resp := putPartialBody(t, srv, signer, true)
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("status = %d, want %d", resp.StatusCode, http.StatusBadRequest)
+	}
+	assertNoTempFiles(t, dir)
 }
 
 func TestUploadSlowSteadyClientSucceeds(t *testing.T) {

@@ -14,6 +14,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"testing/iotest"
 	"time"
 
 	"github.com/refringe/anchor-lfs/auth"
@@ -212,6 +213,75 @@ func TestUploadHashMismatch(t *testing.T) {
 
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %d", w.Code)
+	}
+}
+
+// putFuncStore wraps a real storage adapter, replacing Put with put.
+type putFuncStore struct {
+	storage.Adapter
+	put func(body io.Reader) error
+}
+
+func (s *putFuncStore) Put(_ context.Context, _, _ string, body io.Reader, _ int64) error {
+	return s.put(body)
+}
+
+func TestUploadInterruptedIsAClientError(t *testing.T) {
+	data := []byte("interrupted upload")
+	oid := testutil.SHA256Hex(data)
+	tests := []struct {
+		name       string
+		body       io.Reader
+		put        func(cancel context.CancelFunc, body io.Reader) error
+		wantStatus int
+	}{
+		{
+			name: "body read fails",
+			body: io.MultiReader(bytes.NewReader(data[:5]), iotest.ErrReader(errors.New("connection reset by peer"))),
+			put: func(_ context.CancelFunc, body io.Reader) error {
+				if _, err := io.Copy(io.Discard, body); err != nil {
+					return errors.New("upload failed")
+				}
+				return nil
+			},
+			wantStatus: http.StatusBadRequest,
+		},
+		{
+			name: "request cancelled",
+			body: bytes.NewReader(data),
+			put: func(cancel context.CancelFunc, _ io.Reader) error {
+				cancel()
+				return fmt.Errorf("completing upload: %w", context.Canceled)
+			},
+			wantStatus: http.StatusBadRequest,
+		},
+		{
+			name: "storage fails",
+			body: bytes.NewReader(data),
+			put: func(context.CancelFunc, io.Reader) error {
+				return errors.New("bucket unavailable")
+			},
+			wantStatus: http.StatusInternalServerError,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h, store, signer := testHandler(t)
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			h.store = &putFuncStore{Adapter: store, put: func(body io.Reader) error { return tt.put(cancel, body) }}
+
+			uri := signedURI(signer, opUpload, "/org/repo/objects/"+oid)
+			req := httptest.NewRequestWithContext(ctx, http.MethodPut, uri, tt.body)
+			req.ContentLength = int64(len(data))
+			req.SetPathValue("oid", oid)
+			w := httptest.NewRecorder()
+			h.UploadHandler(w, req)
+
+			if w.Code != tt.wantStatus {
+				t.Errorf("status = %d, want %d: %s", w.Code, tt.wantStatus, w.Body.String())
+			}
+		})
 	}
 }
 
