@@ -39,8 +39,8 @@ const s3MaxPutSize int64 = 5 << 30
 // s3MaxIdleConns is the number of idle connections to the S3 endpoint kept open for reuse.
 const s3MaxIdleConns = 64
 
-// ErrObjectTooLarge is returned when an object is too large for a presigned upload.
-var ErrObjectTooLarge = errors.New("object too large for a presigned upload")
+// ErrObjectTooLarge is returned when an object is larger than S3 accepts for the kind of upload requested.
+var ErrObjectTooLarge = errors.New("object too large for this kind of S3 upload")
 
 // Compile-time interface checks.
 var (
@@ -178,7 +178,7 @@ func (s *S3) Get(ctx context.Context, endpoint, oid string) (io.ReadCloser, int6
 	return resp.Body, size, nil
 }
 
-// Put uploads size bytes from reader in buffered parts, writing the object only if its SHA-256 matches the OID.
+// Put uploads size bytes from reader, or all of it if size is negative, storing the object only if the SHA-256 matches.
 func (s *S3) Put(ctx context.Context, endpoint, oid string, reader io.Reader, size int64) error {
 	key, err := s.objectKey(endpoint, oid)
 	if err != nil {
@@ -187,6 +187,9 @@ func (s *S3) Put(ctx context.Context, endpoint, oid string, reader io.Reader, si
 
 	hasher := sha256.New()
 	body := io.TeeReader(reader, hasher)
+	if size < 0 {
+		return s.putUnknownSize(ctx, key, oid, body, hasher)
+	}
 	partSize := max(s3PartSize, (size+s3MaxParts-1)/s3MaxParts)
 
 	if size > partSize {
@@ -197,14 +200,32 @@ func (s *S3) Put(ctx context.Context, endpoint, oid string, reader io.Reader, si
 	if _, err := io.ReadFull(body, buf); err != nil {
 		return fmt.Errorf("reading object %s: %w", oid, err)
 	}
+	return s.putObject(ctx, key, oid, buf, hasher)
+}
+
+// putUnknownSize uploads body until it ends, in one PUT if it fits in a part and as a multipart upload otherwise.
+func (s *S3) putUnknownSize(ctx context.Context, key, oid string, body io.Reader, hasher hash.Hash) error {
+	first := make([]byte, s3PartSize)
+	n, err := fill(body, first)
+	if errors.Is(err, io.EOF) {
+		return s.putObject(ctx, key, oid, first[:n], hasher)
+	}
+	if err != nil {
+		return fmt.Errorf("reading object %s: %w", oid, err)
+	}
+	return s.putMultipart(ctx, key, oid, io.MultiReader(bytes.NewReader(first), body), hasher, -1, s3PartSize)
+}
+
+// putObject writes data in a single PUT if the SHA-256 of everything hashed so far matches the OID.
+func (s *S3) putObject(ctx context.Context, key, oid string, data []byte, hasher hash.Hash) error {
 	if err := verifyOID(hasher, oid); err != nil {
 		return err
 	}
-	_, err = s.client.PutObject(ctx, &s3.PutObjectInput{
+	_, err := s.client.PutObject(ctx, &s3.PutObjectInput{
 		Bucket:        aws.String(s.bucket),
 		Key:           aws.String(key),
-		Body:          bytes.NewReader(buf),
-		ContentLength: aws.Int64(size),
+		Body:          bytes.NewReader(data),
+		ContentLength: aws.Int64(int64(len(data))),
 	})
 	if err != nil {
 		return fmt.Errorf("writing object %s: %w", oid, err)
@@ -212,7 +233,20 @@ func (s *S3) Put(ctx context.Context, endpoint, oid string, reader io.Reader, si
 	return nil
 }
 
-// putMultipart uploads body as a multipart upload, completing it only if the SHA-256 matches the OID.
+// fill reads from r until buf is full or r ends, returning io.EOF only when r ended first.
+func fill(r io.Reader, buf []byte) (int, error) {
+	n := 0
+	for n < len(buf) {
+		read, err := r.Read(buf[n:])
+		n += read
+		if err != nil {
+			return n, err
+		}
+	}
+	return n, nil
+}
+
+// putMultipart uploads size bytes of body, or all of it when size is negative, completing only if the SHA-256 matches.
 func (s *S3) putMultipart(ctx context.Context, key, oid string, body io.Reader, hasher hash.Hash, size, partSize int64) (err error) {
 	created, err := s.client.CreateMultipartUpload(ctx, &s3.CreateMultipartUploadInput{
 		Bucket:            aws.String(s.bucket),
@@ -234,10 +268,24 @@ func (s *S3) putMultipart(ctx context.Context, key, oid string, body io.Reader, 
 
 	buf := make([]byte, partSize)
 	var parts []s3types.CompletedPart
-	for number := int32(1); size > 0; number++ {
-		n := min(partSize, size)
-		if _, err := io.ReadFull(body, buf[:n]); err != nil {
+	for number := int32(1); size != 0; number++ {
+		var n int
+		if size > 0 {
+			n, err = io.ReadFull(body, buf[:min(partSize, size)])
+		} else {
+			n, err = fill(body, buf)
+			if errors.Is(err, io.EOF) {
+				size, err = 0, nil
+			}
+		}
+		if err != nil {
 			return fmt.Errorf("reading object %s: %w", oid, err)
+		}
+		if n == 0 {
+			break
+		}
+		if int64(number) > s3MaxParts {
+			return fmt.Errorf("%w: %s has more than %d parts of %d bytes", ErrObjectTooLarge, oid, s3MaxParts, partSize)
 		}
 		out, err := s.client.UploadPart(ctx, &s3.UploadPartInput{
 			Bucket:            aws.String(s.bucket),
@@ -245,7 +293,7 @@ func (s *S3) putMultipart(ctx context.Context, key, oid string, body io.Reader, 
 			UploadId:          created.UploadId,
 			PartNumber:        aws.Int32(number),
 			Body:              bytes.NewReader(buf[:n]),
-			ContentLength:     aws.Int64(n),
+			ContentLength:     aws.Int64(int64(n)),
 			ChecksumAlgorithm: s3types.ChecksumAlgorithmCrc32,
 		})
 		if err != nil {
@@ -256,7 +304,9 @@ func (s *S3) putMultipart(ctx context.Context, key, oid string, body io.Reader, 
 			PartNumber:    aws.Int32(number),
 			ChecksumCRC32: out.ChecksumCRC32,
 		})
-		size -= n
+		if size > 0 {
+			size -= int64(n)
+		}
 	}
 
 	if err := verifyOID(hasher, oid); err != nil {

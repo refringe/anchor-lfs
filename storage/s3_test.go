@@ -243,59 +243,80 @@ var putSizes = []struct {
 	{"multipart", 2*s3PartSize + 123},
 }
 
+// declaredSizes returns the size to pass to Put when the length is known, and -1 for when it is not.
+func declaredSizes(size int64) map[string]int64 {
+	return map[string]int64{"known size": size, "unknown size": -1}
+}
+
 func TestS3PutAndGet(t *testing.T) {
 	for _, tt := range putSizes {
-		t.Run(tt.name, func(t *testing.T) {
-			store, client := testS3Store(t)
-			data := randomBytes(int(tt.size))
-			oid := testutil.SHA256Hex(data)
-			ctx := t.Context()
+		for name, declared := range declaredSizes(tt.size) {
+			t.Run(tt.name+"/"+name, func(t *testing.T) {
+				testS3PutAndGet(t, tt.size, declared)
+			})
+		}
+	}
+	t.Run("empty/unknown size", func(t *testing.T) {
+		testS3PutAndGet(t, 0, -1)
+	})
+}
 
-			if err := store.Put(ctx, "test", oid, unseekable(bytes.NewReader(data)), tt.size); err != nil {
-				t.Fatalf("Put: %v", err)
-			}
-			if len(client.uploads) != 0 {
-				t.Errorf("%d multipart uploads left open", len(client.uploads))
-			}
+// testS3PutAndGet puts size random bytes declared as declared bytes long, then checks Get returns them.
+func testS3PutAndGet(t *testing.T, size, declared int64) {
+	t.Helper()
+	store, client := testS3Store(t)
+	data := randomBytes(int(size))
+	oid := testutil.SHA256Hex(data)
+	ctx := t.Context()
 
-			reader, size, err := store.Get(ctx, "test", oid)
-			if err != nil {
-				t.Fatalf("Get: %v", err)
-			}
-			defer func() { _ = reader.Close() }()
+	if err := store.Put(ctx, "test", oid, unseekable(bytes.NewReader(data)), declared); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	if len(client.uploads) != 0 {
+		t.Errorf("%d multipart uploads left open", len(client.uploads))
+	}
+	if size < s3PartSize && client.nextUploadID != 0 {
+		t.Errorf("a %d-byte object used a multipart upload", size)
+	}
 
-			if size != tt.size {
-				t.Errorf("Get size = %d, want %d", size, tt.size)
-			}
-			got, err := io.ReadAll(reader)
-			if err != nil {
-				t.Fatalf("ReadAll: %v", err)
-			}
-			if !bytes.Equal(got, data) {
-				t.Fatal("data mismatch")
-			}
-		})
+	reader, gotSize, err := store.Get(ctx, "test", oid)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	defer func() { _ = reader.Close() }()
+
+	if gotSize != size {
+		t.Errorf("Get size = %d, want %d", gotSize, size)
+	}
+	got, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatalf("ReadAll: %v", err)
+	}
+	if !bytes.Equal(got, data) {
+		t.Fatal("data mismatch")
 	}
 }
 
 func TestS3PutHashMismatch(t *testing.T) {
 	for _, tt := range putSizes {
-		t.Run(tt.name, func(t *testing.T) {
-			store, client := testS3Store(t)
-			data := randomBytes(int(tt.size))
-			badOID := "0000000000000000000000000000000000000000000000000000000000000000"
+		for name, declared := range declaredSizes(tt.size) {
+			t.Run(tt.name+"/"+name, func(t *testing.T) {
+				store, client := testS3Store(t)
+				data := randomBytes(int(tt.size))
+				badOID := "0000000000000000000000000000000000000000000000000000000000000000"
 
-			err := store.Put(t.Context(), "test", badOID, unseekable(bytes.NewReader(data)), tt.size)
-			if !errors.Is(err, ErrHashMismatch) {
-				t.Fatalf("Put error = %v, want ErrHashMismatch", err)
-			}
-			if len(client.objects) != 0 {
-				t.Error("object with mismatched hash was written")
-			}
-			if len(client.uploads) != 0 {
-				t.Errorf("%d multipart uploads left open", len(client.uploads))
-			}
-		})
+				err := store.Put(t.Context(), "test", badOID, unseekable(bytes.NewReader(data)), declared)
+				if !errors.Is(err, ErrHashMismatch) {
+					t.Fatalf("Put error = %v, want ErrHashMismatch", err)
+				}
+				if len(client.objects) != 0 {
+					t.Error("object with mismatched hash was written")
+				}
+				if len(client.uploads) != 0 {
+					t.Errorf("%d multipart uploads left open", len(client.uploads))
+				}
+			})
+		}
 	}
 }
 

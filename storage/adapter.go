@@ -8,7 +8,7 @@ import (
 	"time"
 )
 
-// Adapter is the interface for object storage backends; callers must bound the reader passed to Put.
+// Adapter is the interface for object storage backends; callers bound the reader passed to Put, sized -1 if unknown.
 type Adapter interface {
 	Exists(ctx context.Context, endpoint, oid string) (bool, error)
 	Get(ctx context.Context, endpoint, oid string) (io.ReadCloser, int64, error)

@@ -7,6 +7,7 @@ import (
 	"encoding/json/v2"
 	"errors"
 	"fmt"
+	"io"
 	"maps"
 	"math"
 	"net/http"
@@ -214,19 +215,71 @@ func TestUploadHashMismatch(t *testing.T) {
 	}
 }
 
-func TestUploadMissingContentLength(t *testing.T) {
-	h, _, signer := testHandler(t)
+func TestUploadWithoutContentLength(t *testing.T) {
+	data := []byte("upload without a length")
+	oid := testutil.SHA256Hex(data)
+	tests := []struct {
+		name          string
+		maxUploadSize int64
+		want          int
+	}{
+		{"within the limit", 1 << 20, http.StatusOK},
+		{"over the limit", int64(len(data)) - 1, http.StatusRequestEntityTooLarge},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h, store, signer := testHandler(t)
+			h.maxUploadSize = tt.maxUploadSize
+			uri := signedURI(signer, opUpload, "/org/repo/objects/"+oid)
+			req := httptest.NewRequestWithContext(context.Background(), "PUT", uri, bytes.NewReader(data))
+			req.ContentLength = -1
+			req.SetPathValue("oid", oid)
+			w := httptest.NewRecorder()
+			h.UploadHandler(w, req)
 
-	oid := "deadbeef00000000000000000000000000000000000000000000000000000000"
-	uri := signedURI(signer, opUpload, "/org/repo/objects/"+oid)
-	req := httptest.NewRequestWithContext(context.Background(), "PUT", uri, strings.NewReader("data"))
-	req.ContentLength = -1
-	req.SetPathValue("oid", oid)
-	w := httptest.NewRecorder()
-	h.UploadHandler(w, req)
+			if w.Code != tt.want {
+				t.Fatalf("status %d, want %d: %s", w.Code, tt.want, w.Body.String())
+			}
+			exists, err := store.Exists(context.Background(), "/org/repo", oid)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if exists != (tt.want == http.StatusOK) {
+				t.Errorf("object stored = %t, want %t", exists, tt.want == http.StatusOK)
+			}
+		})
+	}
+}
 
-	if w.Code != http.StatusBadRequest {
-		t.Fatalf("expected 400, got %d", w.Code)
+func TestUploadChunkedOverHTTP(t *testing.T) {
+	h, store, signer := testHandler(t)
+	var contentLength int64
+	mux := http.NewServeMux()
+	mux.HandleFunc("PUT /org/repo/objects/{oid}", func(w http.ResponseWriter, r *http.Request) {
+		contentLength = r.ContentLength
+		h.UploadHandler(w, r)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	data := bytes.Repeat([]byte("c"), 3<<20)
+	oid := testutil.SHA256Hex(data)
+	href := signer.Sign(opUpload, srv.URL, "/org/repo/objects/"+oid).Href
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodPut, href, struct{ io.Reader }{bytes.NewReader(data)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := srv.Client().Do(req)
+	if err != nil {
+		t.Fatalf("upload: %v", err)
+	}
+	_ = resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK || contentLength != -1 {
+		t.Fatalf("status %d with request Content-Length %d, want 200 for a chunked request (-1)", resp.StatusCode, contentLength)
+	}
+	if size, err := store.Size(context.Background(), "/org/repo", oid); err != nil || size != int64(len(data)) {
+		t.Errorf("stored size = %d (%v), want %d", size, err, len(data))
 	}
 }
 

@@ -89,56 +89,69 @@ func TestS3IntegrationCheck(t *testing.T) {
 
 func TestS3IntegrationPutAndGet(t *testing.T) {
 	for _, tt := range putSizes {
-		t.Run(tt.name, func(t *testing.T) {
-			store := integrationS3Store(t)
-			ctx := t.Context()
-			data := randomBytes(int(tt.size))
-			oid := testutil.SHA256Hex(data)
+		for name, declared := range declaredSizes(tt.size) {
+			t.Run(tt.name+"/"+name, func(t *testing.T) {
+				testS3IntegrationPutAndGet(t, tt.size, declared)
+			})
+		}
+	}
+	t.Run("empty/unknown size", func(t *testing.T) {
+		testS3IntegrationPutAndGet(t, 0, -1)
+	})
+}
 
-			if err := store.Put(ctx, "/org/repo", oid, unseekable(bytes.NewReader(data)), tt.size); err != nil {
-				t.Fatalf("Put: %v", err)
-			}
+// testS3IntegrationPutAndGet puts size random bytes declared as declared bytes long, then checks Get returns them.
+func testS3IntegrationPutAndGet(t *testing.T, size, declared int64) {
+	t.Helper()
+	store := integrationS3Store(t)
+	ctx := t.Context()
+	data := randomBytes(int(size))
+	oid := testutil.SHA256Hex(data)
 
-			reader, size, err := store.Get(ctx, "/org/repo", oid)
-			if err != nil {
-				t.Fatalf("Get: %v", err)
-			}
-			defer func() { _ = reader.Close() }()
-			if size != tt.size {
-				t.Errorf("Get size = %d, want %d", size, tt.size)
-			}
-			got, err := io.ReadAll(reader)
-			if err != nil {
-				t.Fatalf("ReadAll: %v", err)
-			}
-			if !bytes.Equal(got, data) {
-				t.Fatal("downloaded data does not match uploaded data")
-			}
-		})
+	if err := store.Put(ctx, "/org/repo", oid, unseekable(bytes.NewReader(data)), declared); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+
+	reader, gotSize, err := store.Get(ctx, "/org/repo", oid)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	defer func() { _ = reader.Close() }()
+	if gotSize != size {
+		t.Errorf("Get size = %d, want %d", gotSize, size)
+	}
+	got, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatalf("ReadAll: %v", err)
+	}
+	if !bytes.Equal(got, data) {
+		t.Fatal("downloaded data does not match uploaded data")
 	}
 }
 
 func TestS3IntegrationPutHashMismatch(t *testing.T) {
 	for _, tt := range putSizes {
-		t.Run(tt.name, func(t *testing.T) {
-			store := integrationS3Store(t)
-			ctx := t.Context()
-			data := randomBytes(int(tt.size))
-			badOID := "0000000000000000000000000000000000000000000000000000000000000000"
+		for name, declared := range declaredSizes(tt.size) {
+			t.Run(tt.name+"/"+name, func(t *testing.T) {
+				store := integrationS3Store(t)
+				ctx := t.Context()
+				data := randomBytes(int(tt.size))
+				badOID := "0000000000000000000000000000000000000000000000000000000000000000"
 
-			err := store.Put(ctx, "/org/repo", badOID, unseekable(bytes.NewReader(data)), tt.size)
-			if !errors.Is(err, ErrHashMismatch) {
-				t.Fatalf("Put error = %v, want ErrHashMismatch", err)
-			}
+				err := store.Put(ctx, "/org/repo", badOID, unseekable(bytes.NewReader(data)), declared)
+				if !errors.Is(err, ErrHashMismatch) {
+					t.Fatalf("Put error = %v, want ErrHashMismatch", err)
+				}
 
-			exists, err := store.Exists(ctx, "/org/repo", badOID)
-			if err != nil {
-				t.Fatalf("Exists: %v", err)
-			}
-			if exists {
-				t.Fatal("object with mismatched hash was left in the bucket")
-			}
-		})
+				exists, err := store.Exists(ctx, "/org/repo", badOID)
+				if err != nil {
+					t.Fatalf("Exists: %v", err)
+				}
+				if exists {
+					t.Fatal("object with mismatched hash was left in the bucket")
+				}
+			})
+		}
 	}
 }
 

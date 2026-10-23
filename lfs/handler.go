@@ -246,11 +246,6 @@ func (h *Handler) UploadHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if r.ContentLength < 0 {
-		writeError(w, r, http.StatusBadRequest, "content-length header required")
-		return
-	}
-
 	if r.ContentLength > h.maxUploadSize {
 		writeError(w, r, http.StatusRequestEntityTooLarge, fmt.Sprintf("object exceeds maximum upload size of %d bytes", h.maxUploadSize))
 		return
@@ -284,16 +279,24 @@ func (h *Handler) UploadHandler(w http.ResponseWriter, r *http.Request) {
 			writeError(w, r, http.StatusInsufficientStorage, "insufficient storage")
 			return
 		}
+		if _, ok := errors.AsType[*http.MaxBytesError](err); ok {
+			writeError(w, r, http.StatusRequestEntityTooLarge, fmt.Sprintf("object exceeds maximum upload size of %d bytes", h.maxUploadSize))
+			return
+		}
+		if errors.Is(err, storage.ErrObjectTooLarge) {
+			writeError(w, r, http.StatusRequestEntityTooLarge, "object exceeds the maximum size storage accepts without a Content-Length")
+			return
+		}
 		middleware.Logger(r.Context()).Error().Err(err).Str("oid", oid).Msg("storing object")
 		writeError(w, r, http.StatusInternalServerError, msgInternalError)
 		return
 	}
 
-	middleware.Logger(r.Context()).Info().
-		Str("endpoint", h.endpoint.Name).
-		Str("oid", oid).
-		Int64("size", r.ContentLength).
-		Msg("stored object")
+	stored := middleware.Logger(r.Context()).Info().Str("endpoint", h.endpoint.Name).Str("oid", oid)
+	if r.ContentLength >= 0 {
+		stored = stored.Int64("size", r.ContentLength)
+	}
+	stored.Msg("stored object")
 
 	w.WriteHeader(http.StatusOK)
 }
