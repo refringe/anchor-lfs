@@ -39,8 +39,8 @@ func main() {
 	os.Exit(runCommand(os.Args[1:], os.Stdout, os.Stderr))
 }
 
-// serve runs the server with the configuration at configPath until it receives SIGINT or SIGTERM.
-func serve(configPath string) {
+// serve runs the server with the configuration at configPath until SIGINT or SIGTERM and returns the exit code.
+func serve(configPath string) int {
 	// Default: JSON to stderr.
 	log.Logger = zerolog.New(os.Stderr).With().Timestamp().Logger()
 
@@ -222,9 +222,7 @@ func serve(configPath string) {
 		// protects against slowloris-style attacks on the header phase.
 	}
 
-	// Graceful shutdown.
-	done := make(chan os.Signal, 1)
-	signal.Notify(done, os.Interrupt, syscall.SIGTERM)
+	signalled, stopSignals := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 
 	var listenConfig net.ListenConfig
 	listener, err := listenConfig.Listen(context.Background(), "tcp", cfg.Options.ListenAddress)
@@ -232,26 +230,34 @@ func serve(configPath string) {
 		log.Fatal().Err(err).Str("address", cfg.Options.ListenAddress).Msg("listening")
 	}
 	log.Info().Str("address", listener.Addr().String()).Msg("listening")
-	go func() {
-		if err := server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			log.Fatal().Err(err).Msg("server error")
-		}
-	}()
+
+	served := make(chan error, 1)
+	go func() { served <- server.Serve(listener) }()
 
 	sweepCtx, stopSweep := context.WithCancel(context.Background())
 	go sweepTempFiles(sweepCtx, cfg.Options.DataDirectory)
 
-	<-done
+	exitCode := 0
+	select {
+	case <-signalled.Done():
+		stopSignals() // A second SIGINT or SIGTERM now ends the process at once.
+		log.Info().Str("timeout", cfg.Options.ShutdownTimeout).Msg("shutting down; send the signal again to stop immediately")
+	case err := <-served:
+		log.Error().Err(err).Msg("server error")
+		exitCode = 1
+	}
 	stopSweep()
-	log.Info().Str("timeout", cfg.Options.ShutdownTimeout).Msg("shutting down")
 
 	ctx, cancel := context.WithTimeout(context.Background(), cfg.Options.ShutdownTimeoutDuration)
 	defer cancel()
 
 	if err := server.Shutdown(ctx); err != nil {
-		log.Warn().Err(err).Msg("closing connections still open after shutdown_timeout")
+		log.Error().Err(err).Msg("closing connections still open after shutdown_timeout")
 		_ = server.Close()
+		exitCode = 1
 	}
+
+	_ = rateLimitStore.Close(ctx)
 
 	// Close authenticator background goroutines (e.g., cache sweeper).
 	for _, g := range githubAuths {
@@ -260,6 +266,7 @@ func serve(configPath string) {
 
 	// Zero signing key material in memory.
 	_ = signer.Close()
+	return exitCode
 }
 
 // serverHandler wraps mux with proxy trust, request IDs and, when accessLog is set, the access log.

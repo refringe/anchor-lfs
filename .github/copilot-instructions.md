@@ -73,6 +73,7 @@ The job display names above are the required status check contexts in the reposi
 ├── main_test.go            # Integration tests for the full server
 ├── readiness.go            # GET /ready checks and the `anchor-lfs healthcheck` subcommand (Docker HEALTHCHECK)
 ├── readiness_test.go
+├── shutdown_unix_test.go   # Runs the server as a child process to test signals, the second-signal stop and exit codes
 ├── config/
 │   ├── config.go           # TOML parsing, env var overrides (ANCHOR_LFS_*), validation
 │   └── config_test.go

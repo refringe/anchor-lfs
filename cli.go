@@ -58,8 +58,7 @@ func runCommand(args []string, stdout, stderr io.Writer) int {
 	configPath := config.ResolvePath(*configFlag)
 	switch command {
 	case "":
-		serve(configPath)
-		return 0
+		return serve(configPath)
 	case commandCheck:
 		return runCheck(configPath, stdout, stderr)
 	case commandHealthcheck:
