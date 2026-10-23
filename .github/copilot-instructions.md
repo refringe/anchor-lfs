@@ -78,7 +78,7 @@ The job display names above are the required status check contexts in the reposi
 │   └── config_test.go
 ├── auth/
 │   ├── authenticator.go    # Authenticator interface, Operation and Result types
-│   ├── github.go           # GitHub PAT authentication with TTL cache
+│   ├── github.go           # GitHub PAT authentication, TTL cache per token and endpoint, single-flight lookups
 │   ├── github_test.go
 │   └── none.go             # No-op authenticator for local/test use
 ├── storage/

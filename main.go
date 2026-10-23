@@ -126,8 +126,10 @@ func serve(configPath string) {
 	}
 	log.Info().Strs("trusted_proxies", cfg.Options.TrustedProxies).Msg("trusting X-Forwarded-* headers from these peers")
 
-	// Shared HTTP client for GitHub API calls (connection pooling).
-	githubHTTPClient := &http.Client{Timeout: 10 * time.Second}
+	// Shared HTTP client for GitHub API calls, keeping up to 32 idle connections per host.
+	githubTransport := http.DefaultTransport.(*http.Transport).Clone()
+	githubTransport.MaxIdleConnsPerHost = 32
+	githubHTTPClient := &http.Client{Timeout: 10 * time.Second, Transport: githubTransport}
 
 	mux := http.NewServeMux()
 

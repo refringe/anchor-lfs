@@ -17,6 +17,7 @@ import (
 
 	"github.com/google/go-github/v69/github"
 	"github.com/refringe/anchor-lfs/config"
+	"golang.org/x/sync/singleflight"
 )
 
 // cacheHMACKey is a random key generated at process start used to derive cache keys via HMAC-SHA256. Using HMAC with a
@@ -32,12 +33,12 @@ var cacheHMACKey = func() []byte {
 // Compile-time interface check.
 var _ Authenticator = (*GitHub)(nil)
 
-// GitHub authenticates users by validating their token against the GitHub API.
-// Successful authentication results are cached to reduce API calls.
+// GitHub authenticates tokens against the GitHub API, caching each token's access per endpoint and sharing lookups.
 type GitHub struct {
 	httpClient *http.Client
 	cacheTTL   time.Duration
 	baseURL    *url.URL
+	lookups    singleflight.Group
 
 	mu       sync.Mutex
 	cache    map[string]cacheEntry
@@ -45,12 +46,7 @@ type GitHub struct {
 	stopCh   chan struct{}
 }
 
-// NewGitHub creates a GitHub authenticator. The httpClient is used for GitHub
-// API calls; sharing a single client across endpoints allows connection pooling.
-// If nil, http.DefaultClient is used. The cacheTTL controls how long successful
-// auth results are cached; a zero value disables caching entirely. The baseURL
-// overrides the GitHub API base URL for GitHub Enterprise deployments; pass nil
-// to use the default (https://api.github.com/).
+// NewGitHub returns an authenticator for baseURL (nil for api.github.com) caching results for cacheTTL (0 disables).
 func NewGitHub(httpClient *http.Client, cacheTTL time.Duration, baseURL *url.URL) *GitHub {
 	if httpClient == nil {
 		httpClient = http.DefaultClient
@@ -62,14 +58,36 @@ func NewGitHub(httpClient *http.Client, cacheTTL time.Duration, baseURL *url.URL
 	}
 }
 
+// invalidTokenCacheTTL caps how long a token GitHub rejects as invalid stays cached.
+const invalidTokenCacheTTL = 10 * time.Second
+
+// access is what GitHub reported about one token's access to one repository.
+type access struct {
+	authenticated bool
+	username      string
+	pull          bool
+	push          bool
+	maintainer    bool
+}
+
+// result returns the authentication result for op.
+func (a access) result(op Operation) Result {
+	result := Result{Authenticated: a.authenticated, Username: a.username, Maintainer: a.maintainer}
+	switch op {
+	case OperationDownload:
+		result.Authorized = a.pull
+	case OperationUpload:
+		result.Authorized = a.push
+	}
+	return result
+}
+
 type cacheEntry struct {
-	result  Result
+	access  access
 	expires time.Time
 }
 
-// Authenticate validates the user's GitHub token against the configured
-// repository. The username from Basic Auth is not verified — GitHub tokens
-// are self-authenticating, and Git LFS clients send it only as a hint.
+// Authenticate checks the token's access to the endpoint's repository, ignoring the Basic Auth username.
 func (g *GitHub) Authenticate(ctx context.Context, endpoint *config.Endpoint, _ string, password string, op Operation) (Result, error) {
 	if endpoint.IsPublic() && op == OperationDownload {
 		return Result{Authenticated: true, Authorized: true}, nil
@@ -79,34 +97,46 @@ func (g *GitHub) Authenticate(ctx context.Context, endpoint *config.Endpoint, _ 
 		return Result{}, nil
 	}
 
-	// Cache lookup.
-	key := cacheKey(password, endpoint.Path, op)
-	if g.cacheTTL > 0 {
-		if result, ok := g.cacheLookup(key); ok {
-			return result, nil
-		}
+	key := cacheKey(password, endpoint.Path)
+	if cached, ok := g.cacheLookup(key); ok {
+		return cached.result(op), nil
 	}
 
-	client := github.NewClient(g.httpClient).WithAuthToken(password)
+	lookup := g.lookups.DoChan(key, func() (any, error) {
+		return g.fetchAccess(context.WithoutCancel(ctx), endpoint, password, key)
+	})
+	select {
+	case res := <-lookup:
+		if res.Err != nil {
+			return Result{}, res.Err
+		}
+		fetched, _ := res.Val.(access)
+		return fetched.result(op), nil
+	case <-ctx.Done():
+		return Result{}, fmt.Errorf("%w: %w", ErrUnavailable, ctx.Err())
+	}
+}
+
+// fetchAccess asks GitHub for the token's access to the endpoint's repository and caches any definitive answer.
+func (g *GitHub) fetchAccess(ctx context.Context, endpoint *config.Endpoint, token, key string) (access, error) {
+	client := github.NewClient(g.httpClient).WithAuthToken(token)
 	if g.baseURL != nil {
 		client.BaseURL = g.baseURL
 	}
 
 	repo, _, err := client.Repositories.Get(ctx, endpoint.GitHubOwner, endpoint.GitHubRepo)
 	if err != nil {
-		result, err := classifyGitHubError(err)
-		if err == nil && result.Authenticated {
-			g.cacheStoreIfEnabled(key, result) // Cached: the token is valid but cannot see the repository.
+		denied, err := classifyGitHubError(err)
+		if err == nil {
+			g.cacheStoreIfEnabled(key, denied)
 		}
-		return result, err
+		return denied, err
 	}
 
 	perms := repo.GetPermissions()
 	if perms == nil {
-		// No permissions object — the user is authenticated but we cannot
-		// determine authorization. Return without caching so the next
-		// request retries rather than locking in an ambiguous result.
-		return Result{Authenticated: true}, nil
+		// Without a permissions object the token is valid but its access is unknown, so the answer is not cached.
+		return access{authenticated: true}, nil
 	}
 
 	// Fetch the authenticated user's login for lock ownership.
@@ -114,18 +144,16 @@ func (g *GitHub) Authenticate(ctx context.Context, endpoint *config.Endpoint, _ 
 	if err != nil {
 		return classifyGitHubError(err) // NOT cached.
 	}
-	username := user.GetLogin()
 
-	result := Result{Authenticated: true, Username: username, Maintainer: perms["maintain"] || perms["admin"]}
-	switch op {
-	case OperationDownload:
-		result.Authorized = perms["pull"]
-	case OperationUpload:
-		result.Authorized = perms["push"]
+	granted := access{
+		authenticated: true,
+		username:      user.GetLogin(),
+		pull:          perms["pull"],
+		push:          perms["push"],
+		maintainer:    perms["maintain"] || perms["admin"],
 	}
-
-	g.cacheStoreIfEnabled(key, result)
-	return result, nil
+	g.cacheStoreIfEnabled(key, granted)
+	return granted, nil
 }
 
 // defaultRetryAfter is the wait reported when GitHub rate limits a request without saying when to retry, and
@@ -135,25 +163,25 @@ const (
 	maxRetryAfter     = time.Hour
 )
 
-// classifyGitHubError maps a GitHub API error to a definitive Result, a *RateLimitedError, or an ErrUnavailable error.
-func classifyGitHubError(err error) (Result, error) {
+// classifyGitHubError maps a GitHub API error to a definitive access, a *RateLimitedError, or an ErrUnavailable error.
+func classifyGitHubError(err error) (access, error) {
 	if rateErr, ok := errors.AsType[*github.RateLimitError](err); ok {
-		return Result{}, rateLimited(untilReset(rateErr.Rate.Reset.Time))
+		return access{}, rateLimited(untilReset(rateErr.Rate.Reset.Time))
 	}
 	if abuseErr, ok := errors.AsType[*github.AbuseRateLimitError](err); ok {
-		return Result{}, rateLimited(cmp.Or(abuseErr.GetRetryAfter(), defaultRetryAfter))
+		return access{}, rateLimited(cmp.Or(abuseErr.GetRetryAfter(), defaultRetryAfter))
 	}
 	if respErr, ok := errors.AsType[*github.ErrorResponse](err); ok && respErr.Response != nil {
 		switch respErr.Response.StatusCode {
 		case http.StatusUnauthorized:
-			return Result{}, nil
+			return access{}, nil
 		case http.StatusForbidden, http.StatusNotFound:
-			return Result{Authenticated: true}, nil
+			return access{authenticated: true}, nil
 		case http.StatusTooManyRequests:
-			return Result{}, rateLimited(retryAfter(respErr.Response.Header))
+			return access{}, rateLimited(retryAfter(respErr.Response.Header))
 		}
 	}
-	return Result{}, fmt.Errorf("%w: github API: %w", ErrUnavailable, err)
+	return access{}, fmt.Errorf("%w: github API: %w", ErrUnavailable, err)
 }
 
 // rateLimited returns a RateLimitedError asking the caller to wait, at most maxRetryAfter.
@@ -192,22 +220,27 @@ func (g *GitHub) Close() error {
 	return nil
 }
 
-func (g *GitHub) cacheLookup(key string) (Result, bool) {
+func (g *GitHub) cacheLookup(key string) (access, bool) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	entry, ok := g.cache[key]
 	if !ok {
-		return Result{}, false
+		return access{}, false
 	}
 	if time.Now().After(entry.expires) {
 		delete(g.cache, key)
-		return Result{}, false
+		return access{}, false
 	}
-	return entry.result, true
+	return entry.access, true
 }
 
-func (g *GitHub) cacheStoreIfEnabled(key string, result Result) {
-	if g.cacheTTL <= 0 {
+// cacheStoreIfEnabled caches acc for the cache TTL, or for at most invalidTokenCacheTTL when the token is invalid.
+func (g *GitHub) cacheStoreIfEnabled(key string, acc access) {
+	ttl := g.cacheTTL
+	if !acc.authenticated {
+		ttl = min(ttl, invalidTokenCacheTTL)
+	}
+	if ttl <= 0 {
 		return
 	}
 	g.mu.Lock()
@@ -217,8 +250,8 @@ func (g *GitHub) cacheStoreIfEnabled(key string, result Result) {
 		g.startSweeperLocked()
 	}
 	g.cache[key] = cacheEntry{
-		result:  result,
-		expires: time.Now().Add(g.cacheTTL),
+		access:  acc,
+		expires: time.Now().Add(ttl),
 	}
 }
 
@@ -256,10 +289,9 @@ func (g *GitHub) sweep() {
 	}
 }
 
-// cacheKey builds a cache key from the token, endpoint path, and operation. The token is run through HMAC-SHA256 with a
-// per-process random key so raw credentials are not stored in memory and derived keys are not predictable.
-func cacheKey(token, endpointPath string, op Operation) string {
+// cacheKey builds a cache key from the endpoint path and an HMAC-SHA256 of the token under a per-process random key.
+func cacheKey(token, endpointPath string) string {
 	mac := hmac.New(sha256.New, cacheHMACKey)
 	mac.Write([]byte(token))
-	return hex.EncodeToString(mac.Sum(nil)) + "|" + endpointPath + "|" + string(op)
+	return hex.EncodeToString(mac.Sum(nil)) + "|" + endpointPath
 }

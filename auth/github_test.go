@@ -1,9 +1,11 @@
 package auth
 
 import (
+	"bytes"
 	"context"
 	"encoding/json/v2"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -11,6 +13,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/refringe/anchor-lfs/config"
@@ -76,6 +79,52 @@ func testEndpoint() *config.Endpoint {
 func newGitHubAuth(serverURL string, cacheTTL time.Duration) *GitHub {
 	u, _ := url.Parse(serverURL + "/")
 	return NewGitHub(http.DefaultClient, cacheTTL, u)
+}
+
+// fakeGitHub is an in-memory GitHub API that counts requests and, when release is set, holds them until it is closed.
+type fakeGitHub struct {
+	perms     map[string]bool
+	release   chan struct{}
+	repoCalls atomic.Int64
+	userCalls atomic.Int64
+}
+
+func (f *fakeGitHub) RoundTrip(r *http.Request) (*http.Response, error) {
+	if r.URL.Path == "/user" {
+		f.userCalls.Add(1)
+	} else {
+		f.repoCalls.Add(1)
+	}
+	if f.release != nil {
+		select {
+		case <-f.release:
+		case <-r.Context().Done():
+			return nil, r.Context().Err()
+		}
+	}
+
+	status, body := http.StatusOK, any(map[string]any{"id": 1, "full_name": "org/repo", "permissions": f.perms})
+	switch {
+	case r.Header.Get("Authorization") != "Bearer good-token":
+		status, body = http.StatusUnauthorized, map[string]string{"message": "Bad credentials"}
+	case r.URL.Path == "/user":
+		body = map[string]any{"login": "testuser", "id": 42}
+	}
+	data, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	return &http.Response{
+		StatusCode: status,
+		Header:     http.Header{"Content-Type": {"application/json"}},
+		Body:       io.NopCloser(bytes.NewReader(data)),
+		Request:    r,
+	}, nil
+}
+
+// newFakeGitHubAuth returns a GitHub authenticator that sends its API calls to fake.
+func newFakeGitHubAuth(fake *fakeGitHub, cacheTTL time.Duration) *GitHub {
+	return NewGitHub(&http.Client{Transport: fake}, cacheTTL, &url.URL{Scheme: "https", Host: "api.github.test", Path: "/"})
 }
 
 func TestCacheHit(t *testing.T) {
@@ -147,40 +196,54 @@ func TestCacheExpiry(t *testing.T) {
 	}
 }
 
-func TestNegativeResultNotCached(t *testing.T) {
-	var count atomic.Int64
-	srv := mockGitHubAPI(t, &count, map[string]bool{"pull": true})
-	defer srv.Close()
-
-	g := newGitHubAuth(srv.URL, time.Minute)
-	defer func() { _ = g.Close() }()
-
-	ep := testEndpoint()
-	ctx := context.Background()
-
-	// Bad token returns unauthenticated — should NOT be cached.
-	r1, err := g.Authenticate(ctx, ep, "", "bad-token", OperationDownload)
-	if err != nil {
-		t.Fatalf("Authenticate: %v", err)
+func TestInvalidTokenCachedBriefly(t *testing.T) {
+	tests := []struct {
+		name     string
+		cacheTTL time.Duration
+		window   time.Duration
+	}{
+		{name: "default TTL", cacheTTL: time.Minute, window: invalidTokenCacheTTL},
+		{name: "shorter TTL", cacheTTL: 3 * time.Second, window: 3 * time.Second},
+		{name: "caching disabled", cacheTTL: 0},
 	}
-	if r1.Authenticated {
-		t.Fatal("expected unauthenticated for bad token")
-	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				fake := &fakeGitHub{}
+				g := newFakeGitHubAuth(fake, tt.cacheTTL)
+				defer func() { _ = g.Close() }()
+				authenticate := func() {
+					t.Helper()
+					r, err := g.Authenticate(t.Context(), testEndpoint(), "", "bad-token", OperationUpload)
+					if err != nil || r.Authenticated {
+						t.Fatalf("Authenticate = %+v, %v; want unauthenticated", r, err)
+					}
+				}
 
-	r2, err := g.Authenticate(ctx, ep, "", "bad-token", OperationDownload)
-	if err != nil {
-		t.Fatalf("Authenticate: %v", err)
-	}
-	if r2.Authenticated {
-		t.Fatal("expected unauthenticated for bad token (second call)")
-	}
-
-	if count.Load() != 2 {
-		t.Errorf("expected 2 API calls (negative not cached), got %d", count.Load())
+				authenticate()
+				if tt.window == 0 {
+					authenticate()
+					if got := fake.repoCalls.Load(); got != 2 {
+						t.Errorf("GitHub calls with caching disabled = %d, want 2", got)
+					}
+					return
+				}
+				time.Sleep(tt.window - time.Second)
+				authenticate()
+				if got := fake.repoCalls.Load(); got != 1 {
+					t.Errorf("GitHub calls within %v = %d, want 1", tt.window, got)
+				}
+				time.Sleep(2 * time.Second)
+				authenticate()
+				if got := fake.repoCalls.Load(); got != 2 {
+					t.Errorf("GitHub calls after %v = %d, want 2", tt.window, got)
+				}
+			})
+		})
 	}
 }
 
-func TestCacheKeyIsolation(t *testing.T) {
+func TestCacheSharedAcrossOperationsNotEndpoints(t *testing.T) {
 	var count atomic.Int64
 	srv := mockGitHubAPI(t, &count, map[string]bool{"pull": true, "push": false})
 	defer srv.Close()
@@ -191,7 +254,6 @@ func TestCacheKeyIsolation(t *testing.T) {
 	ep := testEndpoint()
 	ctx := context.Background()
 
-	// Download should hit API.
 	r1, err := g.Authenticate(ctx, ep, "", "good-token", OperationDownload)
 	if err != nil {
 		t.Fatalf("download Authenticate: %v", err)
@@ -200,18 +262,101 @@ func TestCacheKeyIsolation(t *testing.T) {
 		t.Fatal("expected download authorized")
 	}
 
-	// Upload with same token should hit API again (different op = different key).
 	r2, err := g.Authenticate(ctx, ep, "", "good-token", OperationUpload)
 	if err != nil {
 		t.Fatalf("upload Authenticate: %v", err)
 	}
-	if r2.Authorized {
-		t.Fatal("expected upload not authorized (push=false)")
+	if r2.Authorized || r2.Username != "testuser" {
+		t.Fatalf("upload = %+v, want unauthorised testuser (push=false)", r2)
+	}
+	if got := count.Load(); got != 1 {
+		t.Errorf("GitHub calls for both operations = %d, want 1", got)
 	}
 
-	if count.Load() != 2 {
-		t.Errorf("expected 2 API calls (different ops), got %d", count.Load())
+	other := testEndpoint()
+	other.Path = "/org/other"
+	if _, err := g.Authenticate(ctx, other, "", "good-token", OperationDownload); err != nil {
+		t.Fatalf("other endpoint Authenticate: %v", err)
 	}
+	if got := count.Load(); got != 2 {
+		t.Errorf("GitHub calls after a second endpoint = %d, want 2", got)
+	}
+}
+
+func TestConcurrentLookupsShareOneCall(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		fake := &fakeGitHub{perms: map[string]bool{"pull": true, "push": true}, release: make(chan struct{})}
+		g := newFakeGitHubAuth(fake, time.Minute)
+		defer func() { _ = g.Close() }()
+
+		results := make([]Result, 20)
+		var wg sync.WaitGroup
+		for i := range results {
+			op := OperationDownload
+			if i%2 == 1 {
+				op = OperationUpload
+			}
+			wg.Go(func() {
+				r, err := g.Authenticate(t.Context(), testEndpoint(), "", "good-token", op)
+				if err != nil {
+					t.Errorf("Authenticate: %v", err)
+				}
+				results[i] = r
+			})
+		}
+		synctest.Wait()
+		close(fake.release)
+		wg.Wait()
+
+		for i, r := range results {
+			if !r.Authorized || r.Username != "testuser" {
+				t.Errorf("result %d = %+v, want authorised testuser", i, r)
+			}
+		}
+		if repo, user := fake.repoCalls.Load(), fake.userCalls.Load(); repo != 1 || user != 1 {
+			t.Errorf("GitHub calls = %d repository and %d user, want 1 of each", repo, user)
+		}
+	})
+}
+
+func TestLookupSurvivesFirstCallerLeaving(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		fake := &fakeGitHub{perms: map[string]bool{"pull": true}, release: make(chan struct{})}
+		g := newFakeGitHubAuth(fake, time.Minute)
+		defer func() { _ = g.Close() }()
+
+		firstCtx, leave := context.WithCancel(t.Context())
+		var firstErr error
+		var wg sync.WaitGroup
+		wg.Go(func() {
+			_, firstErr = g.Authenticate(firstCtx, testEndpoint(), "", "good-token", OperationDownload)
+		})
+		synctest.Wait()
+		var second Result
+		var secondErr error
+		wg.Go(func() {
+			second, secondErr = g.Authenticate(t.Context(), testEndpoint(), "", "good-token", OperationDownload)
+		})
+		synctest.Wait()
+
+		leave()
+		synctest.Wait()
+		close(fake.release)
+		wg.Wait()
+
+		if !errors.Is(firstErr, context.Canceled) || !errors.Is(firstErr, ErrUnavailable) {
+			t.Errorf("first caller error = %v, want ErrUnavailable wrapping context.Canceled", firstErr)
+		}
+		if secondErr != nil || !second.Authorized {
+			t.Errorf("second caller = %+v, %v; want authorised", second, secondErr)
+		}
+		if _, err := g.Authenticate(t.Context(), testEndpoint(), "", "good-token", OperationDownload); err != nil {
+			t.Fatalf("cached Authenticate: %v", err)
+		}
+		if got := fake.repoCalls.Load(); got != 1 {
+			t.Errorf("GitHub repository calls = %d, want 1", got)
+		}
+	})
 }
 
 func TestCacheDisabledWhenTTLZero(t *testing.T) {
@@ -274,9 +419,9 @@ func TestSweepCleansExpiredEntries(t *testing.T) {
 	// Manually populate cache with expired entries.
 	g.mu.Lock()
 	g.cache = map[string]cacheEntry{
-		"key1": {result: Result{Authenticated: true}, expires: time.Now().Add(-time.Second)},
-		"key2": {result: Result{Authenticated: true}, expires: time.Now().Add(-time.Second)},
-		"key3": {result: Result{Authenticated: true}, expires: time.Now().Add(time.Hour)}, // Not expired.
+		"key1": {access: access{authenticated: true}, expires: time.Now().Add(-time.Second)},
+		"key2": {access: access{authenticated: true}, expires: time.Now().Add(-time.Second)},
+		"key3": {access: access{authenticated: true}, expires: time.Now().Add(time.Hour)}, // Not expired.
 	}
 	g.mu.Unlock()
 
@@ -378,7 +523,7 @@ func TestGitHubAPIErrors(t *testing.T) {
 		wantUnavailable bool
 		wantCached      bool
 	}{
-		{name: "bad credentials", status: http.StatusUnauthorized, body: map[string]string{"message": "Bad credentials"}},
+		{name: "bad credentials", status: http.StatusUnauthorized, body: map[string]string{"message": "Bad credentials"}, wantCached: true},
 		{name: "repository not visible", status: http.StatusNotFound, body: map[string]string{"message": "Not Found"}, want: Result{Authenticated: true}, wantCached: true},
 		{
 			name:       "SSO not authorised",
