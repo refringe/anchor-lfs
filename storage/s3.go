@@ -77,6 +77,7 @@ type S3Config struct {
 	Prefix          string
 	PresignedURLs   bool
 	ForcePathStyle  bool
+	MaxUploadSize   int64
 }
 
 // S3 stores objects in an S3-compatible bucket, such as AWS S3 or Cloudflare R2, with transfers proxied by the server.
@@ -84,6 +85,9 @@ type S3 struct {
 	client s3API
 	bucket string
 	prefix string
+
+	// streamPartSize is the part size for uploads of unknown length, large enough to fit the maximum upload size.
+	streamPartSize int64
 }
 
 // PresignedS3 is an S3 adapter that hands clients presigned URLs for direct transfers to and from the bucket.
@@ -98,7 +102,7 @@ func NewS3(ctx context.Context, cfg S3Config) (Adapter, error) {
 	if err != nil {
 		return nil, err
 	}
-	store := &S3{client: client, bucket: cfg.Bucket, prefix: cfg.Prefix}
+	store := &S3{client: client, bucket: cfg.Bucket, prefix: cfg.Prefix, streamPartSize: partSizeFor(cfg.MaxUploadSize)}
 	if cfg.PresignedURLs {
 		return &PresignedS3{S3: store, presigner: s3.NewPresignClient(client)}, nil
 	}
@@ -190,7 +194,7 @@ func (s *S3) Put(ctx context.Context, endpoint, oid string, reader io.Reader, si
 	if size < 0 {
 		return s.putUnknownSize(ctx, key, oid, body, hasher)
 	}
-	partSize := max(s3PartSize, (size+s3MaxParts-1)/s3MaxParts)
+	partSize := partSizeFor(size)
 
 	if size > partSize {
 		return s.putMultipart(ctx, key, oid, body, hasher, size, partSize)
@@ -205,15 +209,21 @@ func (s *S3) Put(ctx context.Context, endpoint, oid string, reader io.Reader, si
 
 // putUnknownSize uploads body until it ends, in one PUT if it fits in a part and as a multipart upload otherwise.
 func (s *S3) putUnknownSize(ctx context.Context, key, oid string, body io.Reader, hasher hash.Hash) error {
-	first := make([]byte, s3PartSize)
-	n, err := fill(body, first)
+	partSize := max(s.streamPartSize, s3PartSize)
+	var first bytes.Buffer
+	_, err := io.CopyN(&first, body, partSize)
 	if errors.Is(err, io.EOF) {
-		return s.putObject(ctx, key, oid, first[:n], hasher)
+		return s.putObject(ctx, key, oid, first.Bytes(), hasher)
 	}
 	if err != nil {
 		return fmt.Errorf("reading object %s: %w", oid, err)
 	}
-	return s.putMultipart(ctx, key, oid, io.MultiReader(bytes.NewReader(first), body), hasher, -1, s3PartSize)
+	return s.putMultipart(ctx, key, oid, io.MultiReader(&first, body), hasher, -1, partSize)
+}
+
+// partSizeFor returns the part size that fits size bytes into s3MaxParts parts, and at least s3PartSize.
+func partSizeFor(size int64) int64 {
+	return max(s3PartSize, size/s3MaxParts+min(size%s3MaxParts, 1))
 }
 
 // putObject writes data in a single PUT if the SHA-256 of everything hashed so far matches the OID.

@@ -87,6 +87,7 @@ func serve(configPath string) {
 			Prefix:          cfg.Storage.S3Prefix,
 			PresignedURLs:   cfg.Storage.S3PresignedURLsEnabled(),
 			ForcePathStyle:  cfg.Storage.S3ForcePathStyleEnabled(),
+			MaxUploadSize:   cfg.Options.MaxUploadSize,
 		})
 		if err != nil {
 			log.Fatal().Err(err).Msg("creating S3 storage adapter")

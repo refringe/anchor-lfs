@@ -28,6 +28,7 @@ type mockS3Client struct {
 	objects      map[string][]byte
 	uploads      map[string]map[int32][]byte
 	nextUploadID int
+	partUploads  int
 
 	bucketErr error
 	headErr   error
@@ -113,6 +114,7 @@ func (m *mockS3Client) UploadPart(_ context.Context, input *s3.UploadPartInput, 
 	}
 	number := aws.ToInt32(input.PartNumber)
 	parts[number] = data
+	m.partUploads++
 	return &s3.UploadPartOutput{ETag: aws.String(fmt.Sprintf("etag-%d", number))}, nil
 }
 
@@ -294,6 +296,42 @@ func testS3PutAndGet(t *testing.T, size, declared int64) {
 	}
 	if !bytes.Equal(got, data) {
 		t.Fatal("data mismatch")
+	}
+}
+
+func TestPartSizeFor(t *testing.T) {
+	tests := []struct {
+		size int64
+		want int64
+	}{
+		{0, s3PartSize},
+		{5 << 30, s3PartSize},
+		{s3PartSize * s3MaxParts, s3PartSize},
+		{s3PartSize*s3MaxParts + 1, s3PartSize + 1},
+		{100 << 30, 10737419},
+		{math.MaxInt64, math.MaxInt64/s3MaxParts + 1},
+	}
+	for _, tt := range tests {
+		if got := partSizeFor(tt.size); got != tt.want {
+			t.Errorf("partSizeFor(%d) = %d, want %d", tt.size, got, tt.want)
+		}
+	}
+}
+
+func TestS3PutUnknownSizeUsesStreamPartSize(t *testing.T) {
+	store, client := testS3Store(t)
+	store.streamPartSize = 2 * s3PartSize
+	data := randomBytes(int(3 * s3PartSize))
+	oid := testutil.SHA256Hex(data)
+
+	if err := store.Put(t.Context(), "test", oid, unseekable(bytes.NewReader(data)), -1); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	if client.partUploads != 2 {
+		t.Errorf("uploaded %d parts, want 2 of %d bytes", client.partUploads, store.streamPartSize)
+	}
+	if !bytes.Equal(client.objects["lfs/test/"+oid[:2]+"/"+oid[2:4]+"/"+oid], data) {
+		t.Error("stored object does not match the uploaded data")
 	}
 }
 
@@ -544,6 +582,27 @@ func TestNewS3PresignedURLs(t *testing.T) {
 				t.Errorf("adapter implements PresignedURLProvider = %t, want %t", ok, presigned)
 			}
 		})
+	}
+}
+
+func TestNewS3SizesStreamPartsFromMaxUploadSize(t *testing.T) {
+	const maxUploadSize = 100 << 30
+	store, err := NewS3(t.Context(), S3Config{
+		Bucket:          "test-bucket",
+		Region:          "us-east-1",
+		AccessKeyID:     "id",
+		SecretAccessKey: "secret",
+		MaxUploadSize:   maxUploadSize,
+	})
+	if err != nil {
+		t.Fatalf("NewS3: %v", err)
+	}
+	s3Store, ok := store.(*S3)
+	if !ok {
+		t.Fatalf("NewS3 returned %T, want *S3", store)
+	}
+	if want := partSizeFor(maxUploadSize); s3Store.streamPartSize != want {
+		t.Errorf("streamPartSize = %d, want %d", s3Store.streamPartSize, want)
 	}
 }
 
