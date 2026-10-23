@@ -418,6 +418,10 @@ func (h *Handler) ListLocksHandler(w http.ResponseWriter, r *http.Request) {
 		Refspec: query.Get("refspec"),
 		Limit:   limit,
 	})
+	if errors.Is(err, ErrInvalidLockCursor) {
+		writeError(w, r, http.StatusUnprocessableEntity, "invalid cursor")
+		return
+	}
 	if err != nil {
 		middleware.Logger(r.Context()).Error().Err(err).Str("endpoint", h.endpoint.Name).Msg("listing locks")
 		writeError(w, r, http.StatusInternalServerError, msgInternalError)
@@ -450,6 +454,10 @@ func (h *Handler) VerifyLocksHandler(w http.ResponseWriter, r *http.Request) {
 		Cursor: req.Cursor,
 		Limit:  req.Limit,
 	})
+	if errors.Is(err, ErrInvalidLockCursor) {
+		writeError(w, r, http.StatusUnprocessableEntity, "invalid cursor")
+		return
+	}
 	if err != nil {
 		middleware.Logger(r.Context()).Error().Err(err).Str("endpoint", h.endpoint.Name).Msg("verifying locks")
 		writeError(w, r, http.StatusInternalServerError, msgInternalError)

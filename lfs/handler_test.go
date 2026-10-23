@@ -1861,6 +1861,26 @@ func (noCredentialsAuth) Authenticate(_ context.Context, _ *config.Endpoint, _, 
 	return auth.Result{}, nil
 }
 
+func TestLockListingsRejectInvalidCursors(t *testing.T) {
+	h, _, _ := testHandler(t)
+
+	listReq := httptest.NewRequestWithContext(context.Background(), "GET", "/org/repo/locks?cursor=not-a-cursor", nil)
+	listReq.Header.Set("Accept", lfsMediaType)
+	lw := httptest.NewRecorder()
+	h.ListLocksHandler(lw, listReq)
+
+	body, _ := json.Marshal(VerifyLocksRequest{Cursor: "not-a-cursor"})
+	verifyReq := httptest.NewRequestWithContext(context.Background(), "POST", "/org/repo/locks/verify", bytes.NewReader(body))
+	verifyReq.Header.Set("Accept", lfsMediaType)
+	verifyReq.Header.Set("Content-Type", lfsMediaType)
+	vw := httptest.NewRecorder()
+	h.VerifyLocksHandler(vw, verifyReq)
+
+	if lw.Code != http.StatusUnprocessableEntity || vw.Code != http.StatusUnprocessableEntity {
+		t.Errorf("list status %d, verify status %d; want 422 for both", lw.Code, vw.Code)
+	}
+}
+
 func TestLockHandlersAuthenticateBeforeCheckingTheRequest(t *testing.T) {
 	h, _, _ := testHandler(t)
 	h.auth = noCredentialsAuth{}

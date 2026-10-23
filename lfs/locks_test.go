@@ -2,6 +2,7 @@ package lfs
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json/v2"
 	"errors"
 	"fmt"
@@ -373,6 +374,7 @@ func TestFileLockStoreListOptions(t *testing.T) {
 		{ID: "id-2", Path: "b.bin", LockedAt: "2026-01-01T00:00:02Z"},
 	})
 	all := []string{"id-1", "id-2", "id-3", "id-4"}
+	cursorAt := func(id, lockedAt string) string { return lockCursor(Lock{ID: id, LockedAt: lockedAt}) }
 	tests := []struct {
 		name       string
 		opts       ListLocksOptions
@@ -380,16 +382,22 @@ func TestFileLockStoreListOptions(t *testing.T) {
 		wantCursor string
 	}{
 		{name: "all, by time then ID", opts: ListLocksOptions{}, wantIDs: all},
-		{name: "first page", opts: ListLocksOptions{Limit: 2}, wantIDs: []string{"id-1", "id-2"}, wantCursor: "id-2"},
-		{name: "last page", opts: ListLocksOptions{Limit: 2, Cursor: "id-2"}, wantIDs: []string{"id-3", "id-4"}},
-		{name: "unknown cursor", opts: ListLocksOptions{Cursor: "id-9"}, wantIDs: all},
+		{
+			name:       "first page",
+			opts:       ListLocksOptions{Limit: 2},
+			wantIDs:    []string{"id-1", "id-2"},
+			wantCursor: cursorAt("id-2", "2026-01-01T00:00:02Z"),
+		},
+		{name: "last page", opts: ListLocksOptions{Limit: 2, Cursor: cursorAt("id-2", "2026-01-01T00:00:02Z")}, wantIDs: []string{"id-3", "id-4"}},
+		{name: "cursor of a released lock", opts: ListLocksOptions{Cursor: cursorAt("id-2a", "2026-01-01T00:00:02Z")}, wantIDs: []string{"id-3", "id-4"}},
+		{name: "cursor past the end", opts: ListLocksOptions{Cursor: cursorAt("id-9", "2026-01-01T00:00:09Z")}, wantIDs: []string{}},
 		{name: "limit above maximum", opts: ListLocksOptions{Limit: maxLockLimit + 1}, wantIDs: all},
 		{name: "path", opts: ListLocksOptions{Path: "b.bin"}, wantIDs: []string{"id-2"}},
 		{name: "unknown path", opts: ListLocksOptions{Path: "e.bin"}, wantIDs: []string{}},
 		{name: "path and its ID", opts: ListLocksOptions{Path: "b.bin", ID: "id-2"}, wantIDs: []string{"id-2"}},
 		{name: "path and another ID", opts: ListLocksOptions{Path: "b.bin", ID: "id-3"}, wantIDs: []string{}},
-		{name: "ID past its own cursor", opts: ListLocksOptions{ID: "id-3", Cursor: "id-3"}, wantIDs: []string{}},
-		{name: "ID with another cursor", opts: ListLocksOptions{ID: "id-3", Cursor: "id-1"}, wantIDs: []string{"id-3"}},
+		{name: "ID past its own cursor", opts: ListLocksOptions{ID: "id-3", Cursor: cursorAt("id-3", "2026-01-01T00:00:02Z")}, wantIDs: []string{}},
+		{name: "ID with an earlier cursor", opts: ListLocksOptions{ID: "id-3", Cursor: cursorAt("id-1", "2026-01-01T00:00:01Z")}, wantIDs: []string{"id-3"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -404,6 +412,46 @@ func TestFileLockStoreListOptions(t *testing.T) {
 				t.Errorf("cursor = %q, want %q", cursor, tt.wantCursor)
 			}
 		})
+	}
+}
+
+func TestFileLockStoreListRejectsInvalidCursors(t *testing.T) {
+	s := lockStoreWithFile(t, []Lock{{ID: "id-1", Path: "a.bin", LockedAt: "2026-01-01T00:00:01Z"}})
+	for _, cursor := range []string{"id-1", "not base64!", base64.RawURLEncoding.EncodeToString([]byte("no separator"))} {
+		if _, _, err := s.List(t.Context(), "/repo", ListLocksOptions{Cursor: cursor}); !errors.Is(err, ErrInvalidLockCursor) {
+			t.Errorf("List with cursor %q: error = %v, want ErrInvalidLockCursor", cursor, err)
+		}
+	}
+}
+
+func TestFileLockStorePagingSurvivesReleasingTheCursorLock(t *testing.T) {
+	s := NewFileLockStore(t.TempDir())
+	ctx := t.Context()
+	for i := range 5 {
+		if _, err := s.Create(ctx, "/repo", fmt.Sprintf("file-%d.bin", i), "owner"); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	first, cursor, err := s.List(ctx, "/repo", ListLocksOptions{Limit: 2})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if _, err := s.Unlock(ctx, "/repo", first[1].ID, "owner", false); err != nil {
+		t.Fatal(err)
+	}
+	seen := lockIDs(first)
+	for cursor != "" {
+		var page []Lock
+		page, cursor, err = s.List(ctx, "/repo", ListLocksOptions{Limit: 2, Cursor: cursor})
+		if err != nil {
+			t.Fatalf("List: %v", err)
+		}
+		seen = append(seen, lockIDs(page)...)
+	}
+
+	if len(seen) != 5 || len(slices.Compact(slices.Sorted(slices.Values(seen)))) != 5 {
+		t.Errorf("paging saw %v, want each of the 5 locks once", seen)
 	}
 }
 

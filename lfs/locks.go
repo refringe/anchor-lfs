@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"cmp"
 	"context"
+	"encoding/base64"
 	"encoding/json/v2"
 	"errors"
 	"fmt"
@@ -23,9 +24,10 @@ import (
 
 // Sentinel errors for lock operations.
 var (
-	ErrLockExists   = errors.New("lock already exists")
-	ErrLockNotFound = errors.New("lock not found")
-	ErrLockNotOwner = errors.New("not the lock owner")
+	ErrLockExists        = errors.New("lock already exists")
+	ErrLockNotFound      = errors.New("lock not found")
+	ErrLockNotOwner      = errors.New("not the lock owner")
+	ErrInvalidLockCursor = errors.New("invalid lock cursor")
 )
 
 // LockStore manages file locks for LFS endpoints.
@@ -34,8 +36,7 @@ type LockStore interface {
 	// path is already locked (the existing lock is returned alongside the error).
 	Create(ctx context.Context, endpoint, path, ownerName string) (Lock, error)
 
-	// List returns locks matching the given options with cursor-based pagination.
-	// The returned string is the next cursor (empty if no more results).
+	// List returns a page of locks matching opts and the next page's cursor ("" on the last), or ErrInvalidLockCursor.
 	List(ctx context.Context, endpoint string, opts ListLocksOptions) ([]Lock, string, error)
 
 	// Unlock releases a lock. Returns ErrLockNotFound if the lock does not
@@ -118,17 +119,22 @@ func (set *lockSet) remove(lock Lock) {
 }
 
 // list returns a copy of the page of locks matching opts and the cursor for the next page, or "" on the last page.
-func (set *lockSet) list(opts ListLocksOptions) ([]Lock, string) {
+func (set *lockSet) list(opts ListLocksOptions) ([]Lock, string, error) {
 	matches := set.sorted
 	if opts.Path != "" || opts.ID != "" {
 		matches = set.match(opts.Path, opts.ID)
 	}
 
-	// Skip past the lock with the cursor ID, or start from the beginning if it is not among the matches.
-	if cursor, ok := set.byID[opts.Cursor]; ok {
-		if i, found := slices.BinarySearchFunc(matches, cursor, compareLocks); found {
-			matches = matches[i+1:]
+	if opts.Cursor != "" {
+		after, err := parseLockCursor(opts.Cursor)
+		if err != nil {
+			return nil, "", err
 		}
+		i, found := slices.BinarySearchFunc(matches, after, compareLocks)
+		if found {
+			i++
+		}
+		matches = matches[i:]
 	}
 
 	limit := opts.Limit
@@ -138,9 +144,27 @@ func (set *lockSet) list(opts ListLocksOptions) ([]Lock, string) {
 		limit = maxLockLimit
 	}
 	if len(matches) <= limit {
-		return slices.Clone(matches), ""
+		return slices.Clone(matches), "", nil
 	}
-	return slices.Clone(matches[:limit]), matches[limit-1].ID
+	return slices.Clone(matches[:limit]), lockCursor(matches[limit-1]), nil
+}
+
+// lockCursor returns an opaque cursor for the position of lock in the listing order.
+func lockCursor(lock Lock) string {
+	return base64.RawURLEncoding.EncodeToString([]byte(lock.LockedAt + "|" + lock.ID))
+}
+
+// parseLockCursor returns a lock holding just the listing position that cursor encodes.
+func parseLockCursor(cursor string) (Lock, error) {
+	data, err := base64.RawURLEncoding.DecodeString(cursor)
+	if err != nil {
+		return Lock{}, ErrInvalidLockCursor
+	}
+	lockedAt, id, ok := strings.Cut(string(data), "|")
+	if !ok || lockedAt == "" || id == "" {
+		return Lock{}, ErrInvalidLockCursor
+	}
+	return Lock{ID: id, LockedAt: lockedAt}, nil
 }
 
 // match returns the lock with the given path and ID, ignoring whichever is empty, as a slice of zero or one locks.
@@ -363,8 +387,7 @@ func (s *FileLockStore) List(ctx context.Context, endpoint string, opts ListLock
 	if err != nil {
 		return nil, "", err
 	}
-	locks, nextCursor := set.list(opts)
-	return locks, nextCursor, nil
+	return set.list(opts)
 }
 
 // Unlock releases a lock by ID, checking ownership unless force is true.
