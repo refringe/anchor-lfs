@@ -41,6 +41,8 @@ type Result struct {
 	Authorized bool
 	// Username identifies the authenticated user (used for lock ownership).
 	Username string
+	// Maintainer indicates the caller may manage the repository, such as by forcing an unlock of someone else's lock.
+	Maintainer bool
 }
 
 // Authenticator checks credentials for an endpoint, returning an error only when the identity provider cannot answer.

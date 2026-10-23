@@ -496,10 +496,14 @@ func (h *Handler) UnlockHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	lock, err := h.lockStore.Unlock(r.Context(), h.endpoint.Path, id, result.Username, req.Force)
+	lock, err := h.lockStore.Unlock(r.Context(), h.endpoint.Path, id, result.Username, req.Force && result.Maintainer)
 	if err != nil {
 		if errors.Is(err, ErrLockNotFound) {
 			writeError(w, r, http.StatusNotFound, "lock not found")
+			return
+		}
+		if errors.Is(err, ErrLockNotOwner) && req.Force {
+			writeError(w, r, http.StatusForbidden, "forcing an unlock of another user's lock requires the maintain or admin permission")
 			return
 		}
 		if errors.Is(err, ErrLockNotOwner) {

@@ -778,6 +778,61 @@ func TestUnlockHandler(t *testing.T) {
 	}
 }
 
+// userAuth is an authenticator that authorises every request as user, as a maintainer when maintainer is set.
+type userAuth struct {
+	user       string
+	maintainer bool
+}
+
+func (a *userAuth) Authenticate(_ context.Context, _ *config.Endpoint, _, _ string, _ auth.Operation) (auth.Result, error) {
+	return auth.Result{Authenticated: true, Authorized: true, Username: a.user, Maintainer: a.maintainer}, nil
+}
+
+func TestUnlockForceRequiresMaintainer(t *testing.T) {
+	tests := []struct {
+		name       string
+		requester  string
+		maintainer bool
+		wantStatus int
+	}{
+		{"maintainer forces another user's lock", "bob", true, http.StatusOK},
+		{"pusher cannot force another user's lock", "bob", false, http.StatusForbidden},
+		{"pusher forces their own lock", "alice", false, http.StatusOK},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h, _, _ := testHandler(t)
+			lock, err := h.lockStore.Create(context.Background(), h.endpoint.Path, "file.txt", "alice")
+			if err != nil {
+				t.Fatal(err)
+			}
+			h.auth = &userAuth{user: tt.requester, maintainer: tt.maintainer}
+
+			body, _ := json.Marshal(UnlockRequest{Force: true})
+			req := httptest.NewRequestWithContext(context.Background(), "POST", "/org/repo/locks/"+lock.ID+"/unlock", bytes.NewReader(body))
+			req.Header.Set("Accept", lfsMediaType)
+			req.Header.Set("Content-Type", lfsMediaType)
+			req.SetPathValue("id", lock.ID)
+			w := httptest.NewRecorder()
+			h.UnlockHandler(w, req)
+
+			if w.Code != tt.wantStatus {
+				t.Fatalf("status %d, want %d: %s", w.Code, tt.wantStatus, w.Body.String())
+			}
+			if tt.wantStatus == http.StatusForbidden && !strings.Contains(w.Body.String(), "maintain or admin") {
+				t.Errorf("error does not name the required permission: %s", w.Body.String())
+			}
+			remaining, _, err := h.lockStore.List(context.Background(), h.endpoint.Path, ListLocksOptions{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if released := len(remaining) == 0; released != (tt.wantStatus == http.StatusOK) {
+				t.Errorf("lock released = %t, want %t", released, tt.wantStatus == http.StatusOK)
+			}
+		})
+	}
+}
+
 func TestVerifyLocksHandler(t *testing.T) {
 	h, _, _ := testHandler(t)
 

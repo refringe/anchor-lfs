@@ -116,14 +116,12 @@ func (g *GitHub) Authenticate(ctx context.Context, endpoint *config.Endpoint, _ 
 	}
 	username := user.GetLogin()
 
-	var result Result
+	result := Result{Authenticated: true, Username: username, Maintainer: perms["maintain"] || perms["admin"]}
 	switch op {
 	case OperationDownload:
-		result = Result{Authenticated: true, Authorized: perms["pull"], Username: username}
+		result.Authorized = perms["pull"]
 	case OperationUpload:
-		result = Result{Authenticated: true, Authorized: perms["push"], Username: username}
-	default:
-		result = Result{Authenticated: true, Username: username}
+		result.Authorized = perms["push"]
 	}
 
 	g.cacheStoreIfEnabled(key, result)

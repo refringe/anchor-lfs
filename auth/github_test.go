@@ -317,6 +317,35 @@ func TestPublicDownloadSkipsCache(t *testing.T) {
 	}
 }
 
+func TestMaintainerFromRepositoryPermissions(t *testing.T) {
+	tests := []struct {
+		name  string
+		perms map[string]bool
+		want  bool
+	}{
+		{"push only", map[string]bool{"pull": true, "push": true}, false},
+		{"maintain", map[string]bool{"pull": true, "push": true, "maintain": true}, true},
+		{"admin", map[string]bool{"pull": true, "push": true, "admin": true}, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var count atomic.Int64
+			srv := mockGitHubAPI(t, &count, tt.perms)
+			defer srv.Close()
+			g := newGitHubAuth(srv.URL, 0)
+			defer func() { _ = g.Close() }()
+
+			r, err := g.Authenticate(context.Background(), testEndpoint(), "", "good-token", OperationUpload)
+			if err != nil {
+				t.Fatalf("Authenticate: %v", err)
+			}
+			if !r.Authorized || r.Maintainer != tt.want {
+				t.Errorf("Authorized = %t, Maintainer = %t; want true, %t", r.Authorized, r.Maintainer, tt.want)
+			}
+		})
+	}
+}
+
 func TestEmptyPasswordNotCached(t *testing.T) {
 	g := NewGitHub(nil, time.Minute, nil)
 	ep := testEndpoint()
