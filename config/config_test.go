@@ -2,6 +2,8 @@ package config
 
 import (
 	"errors"
+	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -954,6 +956,75 @@ github_api_url = "https://custom-proxy.example.com/github/api/"
 	ep := cfg.Endpoints[0]
 	if ep.GitHubBaseURL == nil {
 		t.Fatal("GitHubBaseURL is nil, want non-nil")
+	}
+	if !ep.UnexpectedGitHubAPIHost() {
+		t.Error("UnexpectedGitHubAPIHost() = false for a github.com repository with a custom API host, want true")
+	}
+}
+
+func TestLoadGitHubAPIURLScheme(t *testing.T) {
+	tests := []struct {
+		name    string
+		apiURL  string
+		wantErr bool
+	}{
+		{"https", "https://github.example.com/api/v3/", false},
+		{"http", "http://github.example.com/api/v3/", true},
+		{"http on localhost", "http://localhost:8080/api/v3/", false},
+		{"http on IPv4 loopback", "http://127.0.0.1:8080/api/v3/", false},
+		{"http on IPv6 loopback", "http://[::1]:8080/api/v3/", false},
+		{"http on a host named after localhost", "http://localhost.example.com/api/v3/", true},
+		{"other scheme", "ftp://github.example.com/api/v3/", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := writeConfig(t, fmt.Sprintf(`
+[[endpoints]]
+name = "Test"
+url = "https://github.example.com/org/repo"
+endpoint = "/org/repo"
+visibility = "public"
+authentication = "github"
+github_api_url = %q
+`, tt.apiURL))
+
+			_, err := Load(path)
+			if tt.wantErr && (err == nil || !strings.Contains(err.Error(), "must use https")) {
+				t.Errorf("Load error = %v, want one saying github_api_url must use https", err)
+			}
+			if !tt.wantErr && err != nil {
+				t.Errorf("Load: %v", err)
+			}
+		})
+	}
+}
+
+func TestEndpointUnexpectedGitHubAPIHost(t *testing.T) {
+	tests := []struct {
+		name   string
+		url    string
+		apiURL string
+		want   bool
+	}{
+		{"github.com without an API URL", "https://github.com/org/repo", "", false},
+		{"github.com with api.github.com", "https://github.com/org/repo", "https://api.github.com/", false},
+		{"github.com with another host", "https://github.com/org/repo", "https://proxy.example.com/github/", true},
+		{"GitHub Enterprise with its own API", "https://github.example.com/org/repo", "https://github.example.com/api/v3/", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ep := Endpoint{URL: tt.url}
+			if tt.apiURL != "" {
+				u, err := url.Parse(tt.apiURL)
+				if err != nil {
+					t.Fatal(err)
+				}
+				ep.GitHubBaseURL = u
+			}
+			if got := ep.UnexpectedGitHubAPIHost(); got != tt.want {
+				t.Errorf("UnexpectedGitHubAPIHost() = %t, want %t", got, tt.want)
+			}
+		})
 	}
 }
 

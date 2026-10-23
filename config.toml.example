@@ -62,7 +62,7 @@ authentication = "github"
 #visibility = "private"
 #authentication = "github"
 
-# GitHub Enterprise: set github_api_url to your instance's API endpoint
+# GitHub Enterprise: set github_api_url to your instance's API endpoint (https; it receives every client token)
 #[[endpoints]]
 #name = "GHE Repo"
 #url = "https://github.example.com/org/repo"

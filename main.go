@@ -191,6 +191,10 @@ func serve(configPath string) {
 		if ep.AuthMethod() == "none" {
 			log.Warn().Str("name", ep.Name).Str("path", prefix).Msg("endpoint has no authentication; anyone can read, write and release any lock")
 		}
+		if ep.UnexpectedGitHubAPIHost() {
+			log.Warn().Str("name", ep.Name).Str("path", prefix).Str("github_api_url", ep.GitHubBaseURL.String()).
+				Msg("github_api_url is not api.github.com for a github.com repository; every client token for this endpoint is sent to it")
+		}
 
 		log.Info().
 			Str("name", ep.Name).

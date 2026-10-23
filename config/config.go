@@ -627,6 +627,24 @@ func checkChoice(setting, value string, allowed ...string) error {
 	return fmt.Errorf("unknown %s %q (must be %s)", setting, value, choices)
 }
 
+// isLoopbackHost reports whether host is localhost or a loopback IP address.
+func isLoopbackHost(host string) bool {
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip, err := netip.ParseAddr(host)
+	return err == nil && ip.IsLoopback()
+}
+
+// UnexpectedGitHubAPIHost reports whether a github.com repository uses an API host other than api.github.com.
+func (e *Endpoint) UnexpectedGitHubAPIHost() bool {
+	if e.GitHubBaseURL == nil {
+		return false
+	}
+	u, err := url.Parse(e.URL)
+	return err == nil && strings.EqualFold(u.Host, "github.com") && !strings.EqualFold(e.GitHubBaseURL.Hostname(), "api.github.com")
+}
+
 func (e *Endpoint) parseGitHubURL() error {
 	if e.AuthMethod() != authGitHub {
 		return nil
@@ -652,6 +670,9 @@ func (e *Endpoint) parseGitHubURL() error {
 		apiURL, err := url.Parse(e.GitHubAPIURL)
 		if err != nil || apiURL.Scheme == "" || apiURL.Host == "" {
 			return fmt.Errorf("github_api_url %q is not a valid URL", e.GitHubAPIURL)
+		}
+		if apiURL.Scheme != "https" && (apiURL.Scheme != "http" || !isLoopbackHost(apiURL.Hostname())) {
+			return fmt.Errorf("github_api_url %q must use https (http is allowed only for localhost)", e.GitHubAPIURL)
 		}
 		if !strings.HasSuffix(apiURL.Path, "/") {
 			apiURL.Path += "/"
