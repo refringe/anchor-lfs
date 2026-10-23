@@ -94,7 +94,7 @@ func (h *Handler) processDownload(r *http.Request, obj Object, baseURL string) O
 	}
 
 	path := fmt.Sprintf("%s/objects/%s", h.endpoint.Path, obj.OID)
-	signed := h.signer.Sign(baseURL, path)
+	signed := h.signer.Sign(opDownload, baseURL, path)
 	resp.Authenticated = new(bool)
 	*resp.Authenticated = true
 	resp.Actions = map[string]Action{
@@ -143,12 +143,12 @@ func (h *Handler) processUpload(r *http.Request, obj Object, baseURL string) Obj
 			return resp
 		}
 		verifyPath := fmt.Sprintf("%s/objects/verify", h.endpoint.Path)
-		signedVerify := h.signer.Sign(baseURL, verifyPath)
+		signedVerify := h.signer.Sign(opVerify, baseURL, verifyPath)
 		resp.Authenticated = new(bool)
 		*resp.Authenticated = true
 		resp.Actions = map[string]Action{
 			opUpload: {Href: href, Header: header, ExpiresIn: int64(h.signer.Expiry().Seconds())},
-			"verify": {
+			opVerify: {
 				Href:      signedVerify.Href,
 				ExpiresIn: signedVerify.ExpiresIn,
 				ExpiresAt: signedVerify.ExpiresAt,
@@ -159,8 +159,8 @@ func (h *Handler) processUpload(r *http.Request, obj Object, baseURL string) Obj
 
 	uploadPath := fmt.Sprintf("%s/objects/%s", h.endpoint.Path, obj.OID)
 	verifyPath := fmt.Sprintf("%s/objects/verify", h.endpoint.Path)
-	signedUpload := h.signer.Sign(baseURL, uploadPath)
-	signedVerify := h.signer.Sign(baseURL, verifyPath)
+	signedUpload := h.signer.Sign(opUpload, baseURL, uploadPath)
+	signedVerify := h.signer.Sign(opVerify, baseURL, verifyPath)
 	resp.Authenticated = new(bool)
 	*resp.Authenticated = true
 	resp.Actions = map[string]Action{
@@ -169,7 +169,7 @@ func (h *Handler) processUpload(r *http.Request, obj Object, baseURL string) Obj
 			ExpiresIn: signedUpload.ExpiresIn,
 			ExpiresAt: signedUpload.ExpiresAt,
 		},
-		"verify": {
+		opVerify: {
 			Href:      signedVerify.Href,
 			ExpiresIn: signedVerify.ExpiresIn,
 			ExpiresAt: signedVerify.ExpiresAt,

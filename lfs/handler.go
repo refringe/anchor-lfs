@@ -50,6 +50,7 @@ const (
 const (
 	opDownload = "download"
 	opUpload   = "upload"
+	opVerify   = "verify"
 )
 
 // Handler serves Git LFS API requests for a single endpoint.
@@ -189,7 +190,7 @@ func (h *Handler) BatchHandler(w http.ResponseWriter, r *http.Request) {
 // The HMAC-signed URL already proves the batch handler authenticated and authorized this request. The batch response
 // sets "authenticated": true, which tells the Git LFS client not to resend credentials on transfer requests.
 func (h *Handler) DownloadHandler(w http.ResponseWriter, r *http.Request) {
-	if !h.requireValidSignature(w, r) {
+	if !h.requireValidSignature(w, r, opDownload) {
 		return
 	}
 
@@ -235,7 +236,7 @@ func (h *Handler) DownloadHandler(w http.ResponseWriter, r *http.Request) {
 // The HMAC-signed URL already proves the batch handler authenticated and authorized this request. The batch response
 // sets "authenticated": true, which tells the Git LFS client not to resend credentials on transfer requests.
 func (h *Handler) UploadHandler(w http.ResponseWriter, r *http.Request) {
-	if !h.requireValidSignature(w, r) {
+	if !h.requireValidSignature(w, r, opUpload) {
 		return
 	}
 
@@ -299,7 +300,7 @@ func (h *Handler) UploadHandler(w http.ResponseWriter, r *http.Request) {
 
 // VerifyHandler handles POST /objects/verify requests.
 func (h *Handler) VerifyHandler(w http.ResponseWriter, r *http.Request) {
-	if !h.requireValidSignature(w, r) {
+	if !h.requireValidSignature(w, r, opVerify) {
 		return
 	}
 
@@ -513,10 +514,11 @@ func (h *Handler) UnlockHandler(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, UnlockResponse{Lock: lock})
 }
 
-// requireValidSignature checks that the request URL has a valid, non-expired
-// HMAC signature. Returns false and writes a 403 error if invalid.
-func (h *Handler) requireValidSignature(w http.ResponseWriter, r *http.Request) bool {
-	if err := h.signer.Verify(r.URL.RequestURI()); err != nil {
+// requireValidSignature checks that the request URL is validly signed for operation, writing a 403 if it is not.
+func (h *Handler) requireValidSignature(w http.ResponseWriter, r *http.Request, operation string) bool {
+	baseURL := h.requestBaseURL(r)
+	if err := h.signer.Verify(operation, baseURL, r.URL.RequestURI()); err != nil {
+		middleware.Logger(r.Context()).Debug().Err(err).Str("operation", operation).Str("base_url", baseURL).Msg("rejected signed URL")
 		writeError(w, r, http.StatusForbidden, "invalid or expired URL")
 		return false
 	}

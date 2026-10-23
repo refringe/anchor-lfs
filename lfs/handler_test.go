@@ -2,6 +2,7 @@ package lfs
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/json/v2"
 	"errors"
@@ -49,11 +50,12 @@ func testHandler(t *testing.T) (*Handler, *storage.Local, *URLSigner) {
 	return h, store, signer
 }
 
-// signedURI returns a signed request URI for test requests to transfer endpoints.
-func signedURI(signer *URLSigner, path string) string {
-	signed := signer.Sign("http://test", path)
-	// Strip the scheme+host to get just the request URI.
-	return signed.Href[len("http://test"):]
+// testBaseURL is the base URL of requests built by httptest.NewRequest from a path.
+const testBaseURL = "http://example.com"
+
+// signedURI returns the request URI of a URL signed for operation on path at testBaseURL.
+func signedURI(signer *URLSigner, operation, path string) string {
+	return strings.TrimPrefix(signer.Sign(operation, testBaseURL, path).Href, testBaseURL)
 }
 
 func TestBatchDownloadNotFound(t *testing.T) {
@@ -136,7 +138,7 @@ func TestUploadAndDownload(t *testing.T) {
 	oid := testutil.SHA256Hex(data)
 
 	// Upload.
-	uploadURI := signedURI(signer, "/org/repo/objects/"+oid)
+	uploadURI := signedURI(signer, opUpload, "/org/repo/objects/"+oid)
 	uploadReq := httptest.NewRequestWithContext(context.Background(), "PUT", uploadURI, bytes.NewReader(data))
 	uploadReq.ContentLength = int64(len(data))
 	uploadReq.SetPathValue("oid", oid)
@@ -148,7 +150,7 @@ func TestUploadAndDownload(t *testing.T) {
 	}
 
 	// Download.
-	downloadURI := signedURI(signer, "/org/repo/objects/"+oid)
+	downloadURI := signedURI(signer, opDownload, "/org/repo/objects/"+oid)
 	downloadReq := httptest.NewRequestWithContext(context.Background(), "GET", downloadURI, nil)
 	downloadReq.SetPathValue("oid", oid)
 	dw := httptest.NewRecorder()
@@ -170,7 +172,7 @@ func TestDownloadSetsETag(t *testing.T) {
 	oid := testutil.SHA256Hex(data)
 
 	// Upload first.
-	uploadURI := signedURI(signer, "/org/repo/objects/"+oid)
+	uploadURI := signedURI(signer, opUpload, "/org/repo/objects/"+oid)
 	uploadReq := httptest.NewRequestWithContext(context.Background(), "PUT", uploadURI, bytes.NewReader(data))
 	uploadReq.ContentLength = int64(len(data))
 	uploadReq.SetPathValue("oid", oid)
@@ -178,7 +180,7 @@ func TestDownloadSetsETag(t *testing.T) {
 	h.UploadHandler(uw, uploadReq)
 
 	// Download and check ETag.
-	downloadURI := signedURI(signer, "/org/repo/objects/"+oid)
+	downloadURI := signedURI(signer, opDownload, "/org/repo/objects/"+oid)
 	downloadReq := httptest.NewRequestWithContext(context.Background(), "GET", downloadURI, nil)
 	downloadReq.SetPathValue("oid", oid)
 	dw := httptest.NewRecorder()
@@ -199,7 +201,7 @@ func TestUploadHashMismatch(t *testing.T) {
 	data := []byte("test file content")
 	badOID := "0000000000000000000000000000000000000000000000000000000000000000"
 
-	uri := signedURI(signer, "/org/repo/objects/"+badOID)
+	uri := signedURI(signer, opUpload, "/org/repo/objects/"+badOID)
 	req := httptest.NewRequestWithContext(context.Background(), "PUT", uri, bytes.NewReader(data))
 	req.ContentLength = int64(len(data))
 	req.SetPathValue("oid", badOID)
@@ -215,7 +217,7 @@ func TestUploadMissingContentLength(t *testing.T) {
 	h, _, signer := testHandler(t)
 
 	oid := "deadbeef00000000000000000000000000000000000000000000000000000000"
-	uri := signedURI(signer, "/org/repo/objects/"+oid)
+	uri := signedURI(signer, opUpload, "/org/repo/objects/"+oid)
 	req := httptest.NewRequestWithContext(context.Background(), "PUT", uri, strings.NewReader("data"))
 	req.ContentLength = -1
 	req.SetPathValue("oid", oid)
@@ -245,7 +247,7 @@ func TestUploadAcceptsAnyContentType(t *testing.T) {
 
 			data := []byte("content sent as " + tt.name)
 			oid := testutil.SHA256Hex(data)
-			uri := signedURI(signer, "/org/repo/objects/"+oid)
+			uri := signedURI(signer, opUpload, "/org/repo/objects/"+oid)
 			req := httptest.NewRequestWithContext(context.Background(), "PUT", uri, bytes.NewReader(data))
 			req.ContentLength = int64(len(data))
 			if tt.contentType != "" {
@@ -294,7 +296,7 @@ func TestUploadTooLarge(t *testing.T) {
 	})
 
 	oid := "deadbeef00000000000000000000000000000000000000000000000000000000"
-	uri := signedURI(signer, "/org/repo/objects/"+oid)
+	uri := signedURI(signer, opUpload, "/org/repo/objects/"+oid)
 	req := httptest.NewRequestWithContext(context.Background(), "PUT", uri, strings.NewReader("this is way too large"))
 	req.ContentLength = 21
 	req.SetPathValue("oid", oid)
@@ -310,7 +312,7 @@ func TestDownloadNotFound(t *testing.T) {
 	h, _, signer := testHandler(t)
 
 	oid := "deadbeef00000000000000000000000000000000000000000000000000000000"
-	uri := signedURI(signer, "/org/repo/objects/"+oid)
+	uri := signedURI(signer, opDownload, "/org/repo/objects/"+oid)
 	req := httptest.NewRequestWithContext(context.Background(), "GET", uri, nil)
 	req.SetPathValue("oid", oid)
 	w := httptest.NewRecorder()
@@ -332,7 +334,7 @@ func TestVerifyHandler(t *testing.T) {
 
 	// Verify success.
 	body, _ := json.Marshal(VerifyRequest{OID: oid, Size: int64(len(data))})
-	uri := signedURI(signer, "/org/repo/objects/verify")
+	uri := signedURI(signer, opVerify, "/org/repo/objects/verify")
 	req := httptest.NewRequestWithContext(context.Background(), "POST", uri, bytes.NewReader(body))
 	req.Header.Set("Content-Type", lfsMediaType)
 	w := httptest.NewRecorder()
@@ -344,7 +346,7 @@ func TestVerifyHandler(t *testing.T) {
 
 	// Verify size mismatch.
 	body, _ = json.Marshal(VerifyRequest{OID: oid, Size: 999})
-	uri = signedURI(signer, "/org/repo/objects/verify")
+	uri = signedURI(signer, opVerify, "/org/repo/objects/verify")
 	req = httptest.NewRequestWithContext(context.Background(), "POST", uri, bytes.NewReader(body))
 	req.Header.Set("Content-Type", lfsMediaType)
 	w = httptest.NewRecorder()
@@ -410,7 +412,7 @@ func TestVerifyRejectsInvalidOID(t *testing.T) {
 	h, _, signer := testHandler(t)
 
 	body, _ := json.Marshal(VerifyRequest{OID: "../../../etc/passwd", Size: 100})
-	uri := signedURI(signer, "/org/repo/objects/verify")
+	uri := signedURI(signer, opVerify, "/org/repo/objects/verify")
 	req := httptest.NewRequestWithContext(context.Background(), "POST", uri, bytes.NewReader(body))
 	req.Header.Set("Content-Type", lfsMediaType)
 	w := httptest.NewRecorder()
@@ -425,7 +427,7 @@ func TestVerifyRejectsWrongContentType(t *testing.T) {
 	h, _, signer := testHandler(t)
 
 	body, _ := json.Marshal(VerifyRequest{OID: "deadbeef00000000000000000000000000000000000000000000000000000000", Size: 100})
-	uri := signedURI(signer, "/org/repo/objects/verify")
+	uri := signedURI(signer, opVerify, "/org/repo/objects/verify")
 	req := httptest.NewRequestWithContext(context.Background(), "POST", uri, bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
@@ -847,6 +849,54 @@ func TestDownloadRejectsUnsignedURL(t *testing.T) {
 	}
 }
 
+func TestTransferURLsAreBoundToOperationAndHost(t *testing.T) {
+	content := []byte("bound object")
+	oid := testutil.SHA256Hex(content)
+	path := "/org/repo/objects/" + oid
+
+	tests := []struct {
+		name          string
+		baseURL       string
+		signedFor     string
+		method        string
+		forwardedHost string
+		want          int
+	}{
+		{"download URL downloads", "", opDownload, http.MethodGet, "", http.StatusOK},
+		{"download URL cannot upload", "", opDownload, http.MethodPut, "", http.StatusForbidden},
+		{"upload URL cannot download", "", opUpload, http.MethodGet, "", http.StatusForbidden},
+		{"download URL at another host", "", opDownload, http.MethodGet, "evil.example.com", http.StatusForbidden},
+		{"base_url ignores the request host", "https://lfs.example.com", opDownload, http.MethodGet, "evil.example.com", http.StatusOK},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h, store, signer := testHandler(t)
+			h.baseURL = tt.baseURL
+			if err := store.Put(context.Background(), "/org/repo", oid, bytes.NewReader(content), int64(len(content))); err != nil {
+				t.Fatal(err)
+			}
+
+			signedBase := cmp.Or(tt.baseURL, testBaseURL)
+			uri := strings.TrimPrefix(signer.Sign(tt.signedFor, signedBase, path).Href, signedBase)
+			req := httptest.NewRequestWithContext(context.Background(), tt.method, uri, bytes.NewReader(content))
+			req.SetPathValue("oid", oid)
+			if tt.forwardedHost != "" {
+				req.Header.Set("X-Forwarded-Host", tt.forwardedHost)
+			}
+			w := httptest.NewRecorder()
+			if tt.method == http.MethodPut {
+				h.UploadHandler(w, req)
+			} else {
+				h.DownloadHandler(w, req)
+			}
+
+			if w.Code != tt.want {
+				t.Errorf("%s with a URL signed for %s: status %d, want %d", tt.method, tt.signedFor, w.Code, tt.want)
+			}
+		})
+	}
+}
+
 func TestUploadRejectsExpiredURL(t *testing.T) {
 	dir := t.TempDir()
 	store := storage.NewLocal(dir)
@@ -872,7 +922,7 @@ func TestUploadRejectsExpiredURL(t *testing.T) {
 	})
 
 	oid := "deadbeef00000000000000000000000000000000000000000000000000000000"
-	uri := signedURI(expiredSigner, "/org/repo/objects/"+oid)
+	uri := signedURI(expiredSigner, opUpload, "/org/repo/objects/"+oid)
 	req := httptest.NewRequestWithContext(context.Background(), "PUT", uri, strings.NewReader("data"))
 	req.ContentLength = 4
 	req.SetPathValue("oid", oid)
@@ -1337,7 +1387,7 @@ func TestConcurrentUploads(t *testing.T) {
 
 	for range goroutines {
 		go func() {
-			uri := signedURI(signer, "/org/repo/objects/"+oid)
+			uri := signedURI(signer, opUpload, "/org/repo/objects/"+oid)
 			req := httptest.NewRequestWithContext(context.Background(), "PUT", uri, bytes.NewReader(data))
 			req.ContentLength = int64(len(data))
 			req.SetPathValue("oid", oid)
@@ -1355,7 +1405,7 @@ func TestConcurrentUploads(t *testing.T) {
 	}
 
 	// Verify the object is readable after concurrent uploads.
-	downloadURI := signedURI(signer, "/org/repo/objects/"+oid)
+	downloadURI := signedURI(signer, opDownload, "/org/repo/objects/"+oid)
 	downloadReq := httptest.NewRequestWithContext(context.Background(), "GET", downloadURI, nil)
 	downloadReq.SetPathValue("oid", oid)
 	dw := httptest.NewRecorder()
@@ -1376,7 +1426,7 @@ func TestUploadIdempotent(t *testing.T) {
 	oid := testutil.SHA256Hex(data)
 
 	// First upload.
-	uri := signedURI(signer, "/org/repo/objects/"+oid)
+	uri := signedURI(signer, opUpload, "/org/repo/objects/"+oid)
 	req := httptest.NewRequestWithContext(context.Background(), "PUT", uri, bytes.NewReader(data))
 	req.ContentLength = int64(len(data))
 	req.SetPathValue("oid", oid)
@@ -1387,7 +1437,7 @@ func TestUploadIdempotent(t *testing.T) {
 	}
 
 	// Second upload of the same object — should succeed (idempotent).
-	uri = signedURI(signer, "/org/repo/objects/"+oid)
+	uri = signedURI(signer, opUpload, "/org/repo/objects/"+oid)
 	req = httptest.NewRequestWithContext(context.Background(), "PUT", uri, bytes.NewReader(data))
 	req.ContentLength = int64(len(data))
 	req.SetPathValue("oid", oid)
@@ -1402,7 +1452,7 @@ func TestDownloadInvalidOID(t *testing.T) {
 	h, _, signer := testHandler(t)
 
 	badOID := "not-valid"
-	uri := signedURI(signer, "/org/repo/objects/"+badOID)
+	uri := signedURI(signer, opDownload, "/org/repo/objects/"+badOID)
 	req := httptest.NewRequestWithContext(context.Background(), "GET", uri, nil)
 	req.SetPathValue("oid", badOID)
 	w := httptest.NewRecorder()
@@ -1417,7 +1467,7 @@ func TestUploadInvalidOID(t *testing.T) {
 	h, _, signer := testHandler(t)
 
 	badOID := "zzzz"
-	uri := signedURI(signer, "/org/repo/objects/"+badOID)
+	uri := signedURI(signer, opUpload, "/org/repo/objects/"+badOID)
 	req := httptest.NewRequestWithContext(context.Background(), "PUT", uri, strings.NewReader("data"))
 	req.ContentLength = 4
 	req.SetPathValue("oid", badOID)
@@ -1434,7 +1484,7 @@ func TestVerifyNotFound(t *testing.T) {
 
 	oid := "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
 	body, _ := json.Marshal(VerifyRequest{OID: oid, Size: 100})
-	uri := signedURI(signer, "/org/repo/objects/verify")
+	uri := signedURI(signer, opVerify, "/org/repo/objects/verify")
 	req := httptest.NewRequestWithContext(context.Background(), "POST", uri, bytes.NewReader(body))
 	req.Header.Set("Content-Type", lfsMediaType)
 	w := httptest.NewRecorder()
@@ -1462,7 +1512,7 @@ func TestBatchInvalidJSON(t *testing.T) {
 func TestVerifyInvalidJSON(t *testing.T) {
 	h, _, signer := testHandler(t)
 
-	uri := signedURI(signer, "/org/repo/objects/verify")
+	uri := signedURI(signer, opVerify, "/org/repo/objects/verify")
 	req := httptest.NewRequestWithContext(context.Background(), "POST", uri, strings.NewReader("not json"))
 	req.Header.Set("Content-Type", lfsMediaType)
 	w := httptest.NewRecorder()

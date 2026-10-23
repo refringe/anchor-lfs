@@ -87,7 +87,7 @@ func TestUploadStalledClientTimesOut(t *testing.T) {
 	dir := t.TempDir()
 	srv, signer := idleTimeoutServer(t, storage.NewLocal(dir))
 	oid := testutil.SHA256Hex(bytes.Repeat([]byte("x"), 1000))
-	href := signer.Sign(srv.URL, "/org/repo/objects/"+oid).Href
+	href := signer.Sign(opUpload, srv.URL, "/org/repo/objects/"+oid).Href
 
 	var dialer net.Dialer
 	conn, err := dialer.DialContext(t.Context(), "tcp", srv.Listener.Addr().String())
@@ -99,7 +99,7 @@ func TestUploadStalledClientTimesOut(t *testing.T) {
 		t.Fatal(err)
 	}
 	start := time.Now()
-	request := "PUT " + strings.TrimPrefix(href, srv.URL) + " HTTP/1.1\r\nHost: test\r\nContent-Length: 1000\r\n\r\n" +
+	request := "PUT " + strings.TrimPrefix(href, srv.URL) + " HTTP/1.1\r\nHost: " + srv.Listener.Addr().String() + "\r\nContent-Length: 1000\r\n\r\n" +
 		strings.Repeat("x", 10)
 	if _, err := conn.Write([]byte(request)); err != nil {
 		t.Fatal(err)
@@ -132,7 +132,7 @@ func TestUploadSlowSteadyClientSucceeds(t *testing.T) {
 	srv, signer := idleTimeoutServer(t, storage.NewLocal(t.TempDir()))
 	data := bytes.Repeat([]byte("y"), 200)
 	oid := testutil.SHA256Hex(data)
-	href := signer.Sign(srv.URL, "/org/repo/objects/"+oid).Href
+	href := signer.Sign(opUpload, srv.URL, "/org/repo/objects/"+oid).Href
 
 	body := &slowReader{data: data, chunk: 10, delay: 30 * time.Millisecond}
 	req, err := http.NewRequestWithContext(t.Context(), http.MethodPut, href, body)
@@ -160,7 +160,7 @@ func TestUploadServerPausesAreNotIdle(t *testing.T) {
 	data := bytes.Repeat([]byte("z"), 64<<10)
 	oid := testutil.SHA256Hex(data)
 
-	req, err := http.NewRequestWithContext(t.Context(), http.MethodPut, signer.Sign(srv.URL, "/org/repo/objects/"+oid).Href,
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodPut, signer.Sign(opUpload, srv.URL, "/org/repo/objects/"+oid).Href,
 		bytes.NewReader(data))
 	if err != nil {
 		t.Fatal(err)
