@@ -300,8 +300,8 @@ func (c *Config) applyEnvOverrides() []error {
 	if v := os.Getenv("ANCHOR_LFS_BASE_URL"); v != "" {
 		c.Options.BaseURL = strings.TrimRight(v, "/")
 	}
-	if v := os.Getenv("ANCHOR_LFS_SIGNING_KEY"); v != "" {
-		c.Options.SigningKey = v
+	if err := overrideSecret("ANCHOR_LFS_SIGNING_KEY", &c.Options.SigningKey); err != nil {
+		problems = append(problems, err)
 	}
 	if v, ok := os.LookupEnv("ANCHOR_LFS_TRUSTED_PROXIES"); ok {
 		c.Options.TrustedProxies = []string{}
@@ -363,11 +363,11 @@ func (c *Config) applyEnvOverrides() []error {
 	if v := os.Getenv("ANCHOR_LFS_S3_ENDPOINT"); v != "" {
 		c.Storage.S3Endpoint = v
 	}
-	if v := os.Getenv("ANCHOR_LFS_S3_ACCESS_KEY_ID"); v != "" {
-		c.Storage.S3AccessKeyID = v
+	if err := overrideSecret("ANCHOR_LFS_S3_ACCESS_KEY_ID", &c.Storage.S3AccessKeyID); err != nil {
+		problems = append(problems, err)
 	}
-	if v := os.Getenv("ANCHOR_LFS_S3_SECRET_ACCESS_KEY"); v != "" {
-		c.Storage.S3SecretAccessKey = v
+	if err := overrideSecret("ANCHOR_LFS_S3_SECRET_ACCESS_KEY", &c.Storage.S3SecretAccessKey); err != nil {
+		problems = append(problems, err)
 	}
 	if v := os.Getenv("ANCHOR_LFS_S3_PREFIX"); v != "" {
 		c.Storage.S3Prefix = v
@@ -393,6 +393,30 @@ func overrideBool(name string, target **bool) error {
 		return fmt.Errorf("%s %q must be true or false", name, v)
 	}
 	*target = &b
+	return nil
+}
+
+// overrideSecret sets *target from the named environment variable, or from the file its _FILE variant names.
+func overrideSecret(name string, target *string) error {
+	path := os.Getenv(name + "_FILE")
+	if path == "" {
+		if v := os.Getenv(name); v != "" {
+			*target = v
+		}
+		return nil
+	}
+	if os.Getenv(name) != "" {
+		return fmt.Errorf("set only one of %s and %s_FILE", name, name)
+	}
+	data, err := os.ReadFile(path) //nolint:gosec // path is operator-controlled (an ANCHOR_LFS_*_FILE env var)
+	if err != nil {
+		return fmt.Errorf("%s_FILE: %w", name, err)
+	}
+	v := strings.TrimSpace(string(data))
+	if v == "" {
+		return fmt.Errorf("%s_FILE %q is empty", name, path)
+	}
+	*target = v
 	return nil
 }
 

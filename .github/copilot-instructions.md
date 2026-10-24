@@ -124,8 +124,8 @@ The job display names above are the required status check contexts in the reposi
 ├── .golangci.yml           # Linter configuration (23 linters, UK English)
 ├── .prettierrc.json        # Prettier configuration (JSON/YAML formatting)
 ├── config.toml.example     # Example configuration file
-├── Dockerfile              # Multi-stage build (golang:1.27-alpine -> alpine:3.24)
-├── docker-compose.yml      # Docker Compose deployment of the published ghcr.io/refringe/anchor-lfs:latest image
+├── Dockerfile              # Multi-stage build (golang:1.27-alpine -> alpine:3.24, both digest-pinned)
+├── docker-compose.yml      # Docker Compose deployment of ghcr.io/refringe/anchor-lfs:latest, read-only with all capabilities dropped
 └── .github/
     ├── workflows/          # CI pipelines (format, quality, tests, vulnerability, codeql, docker, release)
     ├── scripts/            # release-notes.sh: release notes grouped by commit type, used by release.yml
@@ -150,7 +150,7 @@ All endpoint routes are registered in `registerRoutes` in `main.go` with explici
 
 ## Configuration
 
-Configuration is loaded from `config.toml` (see `config.toml.example`). Environment variables with the `ANCHOR_LFS_` prefix override TOML values. The config file path comes from `--config`, then `ANCHOR_LFS_CONFIG`, then `config.toml` (`config.ResolvePath`), and `anchor-lfs check` validates a file and prints it with secrets redacted. Tests create their own config in temporary directories and do not require `config.toml` to exist.
+Configuration is loaded from `config.toml` (see `config.toml.example`). Environment variables with the `ANCHOR_LFS_` prefix override TOML values, and the signing key and S3 credentials also take a `_FILE` variant that names a file holding the value. The config file path comes from `--config`, then `ANCHOR_LFS_CONFIG`, then `config.toml` (`config.ResolvePath`), and `anchor-lfs check` validates a file and prints it with secrets redacted. Tests create their own config in temporary directories and do not require `config.toml` to exist.
 
 ## Key Dependencies
 

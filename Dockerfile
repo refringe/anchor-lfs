@@ -1,6 +1,6 @@
 # Build stage: runs natively on the build host regardless of target platform. TARGETOS and TARGETARCH are set
 # automatically by buildx, enabling native Go cross-compilation instead of slow QEMU emulation.
-FROM --platform=$BUILDPLATFORM golang:1.27-alpine AS builder
+FROM --platform=$BUILDPLATFORM golang:1.27-alpine@sha256:b8c9b82affbbb82a020bbcf998dad2ba9516944ac7e883524642a481a9505e9c AS builder
 
 ARG TARGETOS
 ARG TARGETARCH

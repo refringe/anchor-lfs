@@ -750,6 +750,105 @@ authentication = "none"
 	}
 }
 
+func TestEnvOverrideSecretFiles(t *testing.T) {
+	path := writeConfig(t, `
+[[endpoints]]
+name = "Test"
+url = "https://github.com/org/repo"
+endpoint = "/org/repo"
+visibility = "public"
+authentication = "none"
+`)
+
+	key := "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	dir := t.TempDir()
+	for name, value := range map[string]string{
+		"ANCHOR_LFS_SIGNING_KEY":          key,
+		"ANCHOR_LFS_S3_ACCESS_KEY_ID":     "AKID",
+		"ANCHOR_LFS_S3_SECRET_ACCESS_KEY": "secret",
+	} {
+		file := filepath.Join(dir, name)
+		if err := os.WriteFile(file, []byte(value+"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv(name+"_FILE", file)
+	}
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	if cfg.Options.SigningKey != key {
+		t.Errorf("SigningKey = %q, want %q", cfg.Options.SigningKey, key)
+	}
+	if cfg.Storage.S3AccessKeyID != "AKID" {
+		t.Errorf("S3AccessKeyID = %q, want %q", cfg.Storage.S3AccessKeyID, "AKID")
+	}
+	if cfg.Storage.S3SecretAccessKey != "secret" {
+		t.Errorf("S3SecretAccessKey = %q, want %q", cfg.Storage.S3SecretAccessKey, "secret")
+	}
+}
+
+func TestEnvOverrideSecretFileProblems(t *testing.T) {
+	dir := t.TempDir()
+	empty := filepath.Join(dir, "empty")
+	if err := os.WriteFile(empty, []byte(" \n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	missing := filepath.Join(dir, "missing")
+	_, errMissing := os.ReadFile(missing) //nolint:gosec // reads a path inside the test's temporary directory
+
+	tests := []struct {
+		name string
+		env  map[string]string
+		want string
+	}{
+		{
+			name: "both forms set",
+			env: map[string]string{
+				"ANCHOR_LFS_S3_SECRET_ACCESS_KEY":      "secret",
+				"ANCHOR_LFS_S3_SECRET_ACCESS_KEY_FILE": empty,
+			},
+			want: "set only one of ANCHOR_LFS_S3_SECRET_ACCESS_KEY and ANCHOR_LFS_S3_SECRET_ACCESS_KEY_FILE",
+		},
+		{
+			name: "missing file",
+			env:  map[string]string{"ANCHOR_LFS_SIGNING_KEY_FILE": missing},
+			want: "ANCHOR_LFS_SIGNING_KEY_FILE: " + errMissing.Error(),
+		},
+		{
+			name: "empty file",
+			env:  map[string]string{"ANCHOR_LFS_S3_ACCESS_KEY_ID_FILE": empty},
+			want: fmt.Sprintf("ANCHOR_LFS_S3_ACCESS_KEY_ID_FILE %q is empty", empty),
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			for name, value := range tt.env {
+				t.Setenv(name, value)
+			}
+			path := writeConfig(t, `
+[[endpoints]]
+name = "Test"
+url = "https://github.com/org/repo"
+endpoint = "/org/repo"
+visibility = "public"
+authentication = "none"
+`)
+
+			_, err := Load(path)
+			invalid, ok := errors.AsType[*ValidationError](err)
+			if !ok {
+				t.Fatalf("Load error = %v, want *ValidationError", err)
+			}
+			if len(invalid.Problems) != 1 || invalid.Problems[0].Error() != tt.want {
+				t.Errorf("problems = %q, want only %q", invalid.Problems, tt.want)
+			}
+		})
+	}
+}
+
 func TestEnvOverrideMaxUploadSize(t *testing.T) {
 	path := writeConfig(t, `
 [[endpoints]]
