@@ -1777,6 +1777,15 @@ func TestIsValidLockPath(t *testing.T) {
 		{"../traversal", false},
 		{"a/../b", false},
 		{"path\x00evil", false},
+		{`a\b`, true},
+		{`C:\x`, true},
+		{"CON", true},
+		{"nul.txt", true},
+		{"trailing space ", true},
+		{"dir/", false},
+		{"a//b", false},
+		{"./rel", false},
+		{"invalid\xffutf8", false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.path, func(t *testing.T) {

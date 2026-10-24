@@ -14,7 +14,6 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
@@ -620,15 +619,9 @@ func (h *Handler) authenticate(r *http.Request, op auth.Operation) (auth.Result,
 	return h.auth.Authenticate(r.Context(), h.endpoint, username, password, op)
 }
 
-// isValidLockPath checks that a lock path is a valid relative file path free of traversal sequences. Lock paths are
-// Git-relative file paths (e.g. "assets/model.bin"). Rejects absolute paths, empty strings, traversal sequences (..),
-// bare current-directory references ("."), and OS-specific reserved names.
+// isValidLockPath reports whether path is a relative, slash-separated file path with no empty, "." or ".." elements.
 func isValidLockPath(path string) bool {
-	if path == "." {
-		return false
-	}
-	_, err := filepath.Localize(path) //nolint:misspell // stdlib function name uses American English
-	return err == nil
+	return path != "." && fs.ValidPath(path) && !strings.ContainsRune(path, '\x00')
 }
 
 // requestBaseURL returns base_url if set, else one built from the request and any X-Forwarded-Proto and -Host it has.
