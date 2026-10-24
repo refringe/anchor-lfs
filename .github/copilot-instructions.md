@@ -14,6 +14,7 @@ Always run these commands from the repository root. The `Makefile` is the single
 |---|---|---|
 | Install deps | `go mod download` | Run first after cloning |
 | Build | `make build` | Output: `bin/anchor-lfs` |
+| Release archives | `make dist` | Archives for linux, darwin and windows on amd64 and arm64, plus `checksums.txt`, in `dist/` |
 | Run tests | `make test` | Runs `go test -race ./...` |
 | Lint | `make lint` | Runs `go tool golangci-lint run ./...` |
 | Format check | `make fmt-check` | Fails if any Go file needs formatting |
@@ -38,7 +39,7 @@ Six workflows run on every push/PR to `develop` and `main` (in `.github/workflow
 5. **CodeQL** (`codeql.yml`): job `Analyse`, matrix over `actions` and `go`; also runs weekly (Monday 06:23 UTC) and on demand
 6. **Docker** (`docker.yml`): job `Docker Build` builds the image for `linux/amd64` and `linux/arm64` without pushing, then runs `anchor-lfs version` in the amd64 image
 
-A seventh workflow (`release.yml`) runs only on version tags. It checks the tagged commit is on `main`, calls workflows 1 to 4 through `workflow_call`, then publishes the Docker image and the GitHub release in separate least-privilege jobs. All workflows use the Go version from `go.mod`, and every action is pinned to a commit SHA with a `# vX.Y.Z` comment that Dependabot keeps current.
+A seventh workflow (`release.yml`) runs only on version tags. It checks the tagged commit is on `main` and whether it is the highest version tag, calls workflows 1 to 4 through `workflow_call`, then in separate least-privilege jobs builds and attests the `make dist` archives, publishes the Docker image (with an SBOM, `mode=max` provenance and a GitHub attestation), and creates the GitHub release with the archives and notes from `.github/scripts/release-notes.sh` (commits since the previous tag, grouped by conventional-commit type). The image's `latest` tag and the release's Latest badge move only for the highest version. All workflows use the Go version from `go.mod`, and every action is pinned to a commit SHA with a `# vX.Y.Z` comment that Dependabot keeps current.
 
 The job display names above are the required status check contexts in the repository's `develop` branch ruleset, so renaming a job requires updating the ruleset. The repository also has a `main` ruleset blocking deletion and force-pushes.
 
@@ -127,6 +128,7 @@ The job display names above are the required status check contexts in the reposi
 ├── docker-compose.yml      # Docker Compose deployment of the published ghcr.io/refringe/anchor-lfs:latest image
 └── .github/
     ├── workflows/          # CI pipelines (format, quality, tests, vulnerability, codeql, docker, release)
+    ├── scripts/            # release-notes.sh: release notes grouped by commit type, used by release.yml
     ├── CONTRIBUTING.md     # Contribution guidelines
     └── PULL_REQUEST_TEMPLATE.md
 ```

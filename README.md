@@ -29,6 +29,10 @@ docker compose up -d
 
 This runs the published image `ghcr.io/refringe/anchor-lfs:latest`. See the [Docker](https://github.com/refringe/anchor-lfs/wiki/Docker) wiki page for release tags and building your own image.
 
+### Release Binary
+
+Each [release](https://github.com/refringe/anchor-lfs/releases) attaches archives for Linux, macOS and Windows (amd64 and arm64) with checksums and build attestations. See [Installation](https://github.com/refringe/anchor-lfs/wiki/Installation#downloading-a-release) for how to verify them.
+
 ### From Source
 
 Requires Go 1.27 or later.
