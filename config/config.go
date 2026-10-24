@@ -4,6 +4,7 @@ package config
 import (
 	"encoding/hex"
 	"fmt"
+	"net"
 	"net/netip"
 	"net/url"
 	"os"
@@ -76,10 +77,11 @@ const (
 
 // Options holds global server settings.
 type Options struct {
-	ListenAddress string `toml:"listen_address"`
-	DataDirectory string `toml:"data_directory"`
-	BaseURL       string `toml:"base_url,omitempty"`
-	MaxUploadSize int64  `toml:"max_upload_size"`
+	ListenAddress  string `toml:"listen_address"`
+	MetricsAddress string `toml:"metrics_address,omitempty"`
+	DataDirectory  string `toml:"data_directory"`
+	BaseURL        string `toml:"base_url,omitempty"`
+	MaxUploadSize  int64  `toml:"max_upload_size"`
 
 	// Longest wait for more upload body data before the upload is abandoned; zero disables it.
 	UploadIdleTimeout         string        `toml:"upload_idle_timeout"`
@@ -293,6 +295,9 @@ func (c *Config) applyEnvOverrides() []error {
 
 	if v := os.Getenv("ANCHOR_LFS_LISTEN"); v != "" {
 		c.Options.ListenAddress = v
+	}
+	if v := os.Getenv("ANCHOR_LFS_METRICS_ADDRESS"); v != "" {
+		c.Options.MetricsAddress = v
 	}
 	if v := os.Getenv("ANCHOR_LFS_DATA_DIR"); v != "" {
 		c.Options.DataDirectory = v
@@ -549,6 +554,9 @@ func (c *Config) validate() []error {
 			problems = append(problems, fmt.Errorf("base_url %q is not a valid URL", c.Options.BaseURL))
 		}
 	}
+	if err := c.Options.validateMetricsAddress(); err != nil {
+		problems = append(problems, err)
+	}
 	for _, proxy := range c.Options.TrustedProxies {
 		if _, err := netip.ParsePrefix(proxy); err == nil {
 			continue
@@ -577,6 +585,21 @@ func (c *Config) validate() []error {
 		}
 	}
 	return problems
+}
+
+// validateMetricsAddress checks that metrics_address, if set, is a host and numeric port not used by listen_address.
+func (o *Options) validateMetricsAddress() error {
+	if o.MetricsAddress == "" {
+		return nil
+	}
+	_, port, err := net.SplitHostPort(o.MetricsAddress)
+	if _, portErr := strconv.ParseUint(port, 10, 16); err != nil || portErr != nil {
+		return fmt.Errorf(`metrics_address %q must be a host and port, such as "127.0.0.1:9420"`, o.MetricsAddress)
+	}
+	if _, listenPort, err := net.SplitHostPort(o.ListenAddress); err == nil && listenPort == port && port != "0" {
+		return fmt.Errorf("metrics_address %q must use a different port from listen_address %q", o.MetricsAddress, o.ListenAddress)
+	}
+	return nil
 }
 
 // reservedDataDirEntries are names in the data directory that no endpoint's storage directory may use.

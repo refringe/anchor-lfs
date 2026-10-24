@@ -12,6 +12,10 @@ log_format = "json"
 log_level = "info"
 #access_log = true
 
+# Serve Prometheus metrics at /metrics on this separate address (default: off). The metrics have no authentication, so
+# bind them to loopback or a private network.
+#metrics_address = "127.0.0.1:9420"
+
 # Peers allowed to set X-Forwarded-For, -Host and -Proto (default: loopback and private ranges). These headers are
 # removed from requests sent by any other peer. Set to [] to trust no one.
 #trusted_proxies = ["127.0.0.0/8", "::1/128", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "fc00::/7"]

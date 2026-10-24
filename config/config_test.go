@@ -493,6 +493,16 @@ func TestLoadProblemMessages(t *testing.T) {
 			config: "[options]\nupload_idle_timeout = \"-1s\"\n\n" + endpoint("name = \"Test\"\nvisibility = \"public\"\nauthentication = \"none\"\n"),
 			want:   "upload_idle_timeout must not be negative",
 		},
+		{
+			name:   "metrics_address without port",
+			config: "[options]\nmetrics_address = \"localhost\"\n\n" + endpoint("name = \"Test\"\nvisibility = \"public\"\nauthentication = \"none\"\n"),
+			want:   `metrics_address "localhost" must be a host and port, such as "127.0.0.1:9420"`,
+		},
+		{
+			name:   "metrics_address on the listen port",
+			config: "[options]\nmetrics_address = \"127.0.0.1:5420\"\n\n" + endpoint("name = \"Test\"\nvisibility = \"public\"\nauthentication = \"none\"\n"),
+			want:   `metrics_address "127.0.0.1:5420" must use a different port from listen_address ":5420"`,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -670,6 +680,7 @@ authentication = "none"
 `)
 
 	t.Setenv("ANCHOR_LFS_LISTEN", ":9999")
+	t.Setenv("ANCHOR_LFS_METRICS_ADDRESS", "127.0.0.1:9420")
 	t.Setenv("ANCHOR_LFS_DATA_DIR", "/custom/data")
 	t.Setenv("ANCHOR_LFS_SHUTDOWN_TIMEOUT", "2m")
 	t.Setenv("ANCHOR_LFS_UPLOAD_IDLE_TIMEOUT", "0s")
@@ -685,6 +696,9 @@ authentication = "none"
 
 	if cfg.Options.ListenAddress != ":9999" {
 		t.Errorf("env override ListenAddress = %q, want %q", cfg.Options.ListenAddress, ":9999")
+	}
+	if cfg.Options.MetricsAddress != "127.0.0.1:9420" {
+		t.Errorf("env override MetricsAddress = %q, want %q", cfg.Options.MetricsAddress, "127.0.0.1:9420")
 	}
 	if cfg.Options.DataDirectory != "/custom/data" {
 		t.Errorf("env override DataDirectory = %q, want %q", cfg.Options.DataDirectory, "/custom/data")

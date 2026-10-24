@@ -2,7 +2,7 @@
 
 ## Project Summary
 
-Anchor LFS is a lightweight, self-hosted Git LFS server written in Go 1.27. It implements the Git LFS Batch API spec, authenticates against GitHub organisation/repository permissions, and supports local filesystem or S3-compatible object storage with SHA-256 integrity verification. The codebase is small (~3,000 lines of Go across 8 packages) with no web framework; routing uses `net/http` with `http.ServeMux`.
+Anchor LFS is a lightweight, self-hosted Git LFS server written in Go 1.27. It implements the Git LFS Batch API spec, authenticates against GitHub organisation/repository permissions, and supports local filesystem or S3-compatible object storage with SHA-256 integrity verification. The codebase is small (~4,800 lines of Go across 9 packages) with no web framework; routing uses `net/http` with `http.ServeMux`.
 
 ## Build, Test, and Validate
 
@@ -72,6 +72,7 @@ The job display names above are the required status check contexts in the reposi
 ├── cli_test.go
 ├── main.go                 # Server: config loading, startup logging, wiring, route registration, temp file sweep, graceful shutdown
 ├── main_test.go            # Integration tests for the full server
+├── metrics_unix_test.go    # Runs the server as a child process and scrapes metrics_address
 ├── readiness.go            # GET /ready checks and the `anchor-lfs healthcheck` subcommand (Docker HEALTHCHECK)
 ├── readiness_test.go
 ├── shutdown_unix_test.go   # Runs the server as a child process to test signals, the second-signal stop and exit codes
@@ -118,6 +119,7 @@ The job display names above are the required status check contexts in the reposi
 │   ├── logging.go          # Structured request logging middleware
 │   └── logging_test.go
 ├── internal/
+│   ├── metrics/            # Prometheus registry, route-pattern request metrics, free space and auth cache collectors
 │   ├── sanitise/           # Path sanitisation for endpoint directory names (letters, digits, ., _, -; no leading dot)
 │   └── testutil/           # Shared test helpers (e.g., SHA-256 computation)
 ├── Makefile                # All build/test/lint commands
@@ -149,6 +151,8 @@ All endpoint routes are registered in `registerRoutes` in `main.go` with explici
 - `GET /ready`: Readiness check (data directory and storage backend)
 - `GET /`: Version; every other path and method gets a JSON 404 (`registerServiceRoutes`)
 
+`GET /metrics` (Prometheus) is served only on the separate `metrics_address` listener (`serveMetrics`, off by default), never on the main mux. `metrics.Instrument` wraps the mux directly so it can label requests by `r.Pattern`.
+
 ## Configuration
 
 Configuration is loaded from `config.toml` (see `config.toml.example`). Environment variables with the `ANCHOR_LFS_` prefix override TOML values, and the signing key and S3 credentials also take a `_FILE` variant that names a file holding the value. The config file path comes from `--config`, then `ANCHOR_LFS_CONFIG`, then `config.toml` (`config.ResolvePath`), and `anchor-lfs check` validates a file and prints it with secrets redacted. Tests create their own config in temporary directories and do not require `config.toml` to exist.
@@ -160,6 +164,7 @@ Configuration is loaded from `config.toml` (see `config.toml.example`). Environm
 - `github.com/sethvargo/go-limiter`: Rate limiting
 - `github.com/google/go-github/v69`: GitHub API client
 - `github.com/aws/aws-sdk-go-v2`: S3 storage backend
+- `github.com/prometheus/client_golang`: Prometheus metrics
 
 ## Trust These Instructions
 

@@ -24,6 +24,7 @@ import (
 
 	"github.com/refringe/anchor-lfs/auth"
 	"github.com/refringe/anchor-lfs/config"
+	"github.com/refringe/anchor-lfs/internal/metrics"
 	"github.com/refringe/anchor-lfs/internal/testutil"
 	"github.com/refringe/anchor-lfs/lfs"
 	"github.com/refringe/anchor-lfs/middleware"
@@ -126,7 +127,7 @@ func newIntegrationServer(t *testing.T, endpointPath string, rateLimitTokens uin
 	registerRoutes(mux, ep.Path, handler, rateLimitStore)
 	registerServiceRoutes(mux, newReadiness(store, dir))
 
-	srv := httptest.NewServer(serverHandler(mux, proxyTrust, true))
+	srv := httptest.NewServer(serverHandler(mux, proxyTrust, true, metrics.New("test", "test")))
 	t.Cleanup(srv.Close)
 	return srv, store
 }

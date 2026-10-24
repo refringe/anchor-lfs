@@ -13,6 +13,7 @@ A lightweight, standalone [Git LFS](https://git-lfs.com/) server written in Go t
 - SHA-256 integrity verification on upload
 - Configurable per-endpoint visibility (public/private)
 - Per-IP rate limiting on the batch and lock API
+- Optional Prometheus metrics on a separate port
 - Docker-first deployment
 
 ## Quick Start

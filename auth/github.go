@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/go-github/v69/github"
@@ -39,6 +40,9 @@ type GitHub struct {
 	cacheTTL   time.Duration
 	baseURL    *url.URL
 	lookups    singleflight.Group
+
+	cacheHits   atomic.Uint64
+	cacheMisses atomic.Uint64
 
 	mu       sync.Mutex
 	cache    map[string]cacheEntry
@@ -99,8 +103,10 @@ func (g *GitHub) Authenticate(ctx context.Context, endpoint *config.Endpoint, _ 
 
 	key := cacheKey(password, endpoint.Path)
 	if cached, ok := g.cacheLookup(key); ok {
+		g.cacheHits.Add(1)
 		return cached.result(op), nil
 	}
+	g.cacheMisses.Add(1)
 
 	lookup := g.lookups.DoChan(key, func() (any, error) {
 		return g.fetchAccess(context.WithoutCancel(ctx), endpoint, password, key)
@@ -115,6 +121,11 @@ func (g *GitHub) Authenticate(ctx context.Context, endpoint *config.Endpoint, _ 
 	case <-ctx.Done():
 		return Result{}, fmt.Errorf("%w: %w", ErrUnavailable, ctx.Err())
 	}
+}
+
+// CacheStats returns how many authentications the cache answered and how many asked GitHub.
+func (g *GitHub) CacheStats() (hits, misses uint64) {
+	return g.cacheHits.Load(), g.cacheMisses.Load()
 }
 
 // fetchAccess asks GitHub for the token's access to the endpoint's repository and caches any definitive answer.

@@ -39,13 +39,14 @@ type logEntry struct {
 
 // serverProcess is the server running in a child process.
 type serverProcess struct {
-	cmd     *exec.Cmd
-	addr    string
-	entries chan logEntry
-	exited  chan struct{}
+	cmd         *exec.Cmd
+	addr        string
+	metricsAddr string
+	entries     chan logEntry
+	exited      chan struct{}
 }
 
-// startServer runs the server in a child process with shutdownTimeout and waits until it is listening.
+// startServer runs the server in a child process with shutdownTimeout and waits until it serves requests and metrics.
 func startServer(t *testing.T, shutdownTimeout string) *serverProcess {
 	t.Helper()
 	dir := t.TempDir()
@@ -56,6 +57,7 @@ func startServer(t *testing.T, shutdownTimeout string) *serverProcess {
 	configPath := filepath.Join(dir, "config.toml")
 	configText := fmt.Sprintf(`[options]
 listen_address = "127.0.0.1:0"
+metrics_address = "127.0.0.1:0"
 data_directory = %q
 shutdown_timeout = %q
 upload_idle_timeout = "60s"
@@ -104,6 +106,7 @@ authentication = "none"
 	})
 
 	p.addr = p.waitForLog(t, "listening").Address
+	p.metricsAddr = p.waitForLog(t, "serving metrics").Address
 	return p
 }
 

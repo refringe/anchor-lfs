@@ -165,6 +165,9 @@ func TestCacheHit(t *testing.T) {
 	if count.Load() != 1 {
 		t.Errorf("expected 1 API call, got %d", count.Load())
 	}
+	if hits, misses := g.CacheStats(); hits != 1 || misses != 1 {
+		t.Errorf("CacheStats = %d hits, %d misses, want 1 and 1", hits, misses)
+	}
 }
 
 func TestCacheExpiry(t *testing.T) {
@@ -378,6 +381,9 @@ func TestCacheDisabledWhenTTLZero(t *testing.T) {
 	if count.Load() != 3 {
 		t.Errorf("expected 3 API calls with caching disabled, got %d", count.Load())
 	}
+	if hits, misses := g.CacheStats(); hits != 0 || misses != 3 {
+		t.Errorf("CacheStats = %d hits, %d misses, want 0 and 3", hits, misses)
+	}
 }
 
 func TestSweepCleansExpiredEntries(t *testing.T) {
@@ -426,6 +432,9 @@ func TestPublicDownloadSkipsCache(t *testing.T) {
 
 	if count.Load() != 0 {
 		t.Errorf("expected 0 API calls for public download, got %d", count.Load())
+	}
+	if hits, misses := g.CacheStats(); hits != 0 || misses != 0 {
+		t.Errorf("CacheStats = %d hits, %d misses, want 0 and 0", hits, misses)
 	}
 }
 

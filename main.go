@@ -23,6 +23,7 @@ import (
 
 	"github.com/refringe/anchor-lfs/auth"
 	"github.com/refringe/anchor-lfs/config"
+	"github.com/refringe/anchor-lfs/internal/metrics"
 	"github.com/refringe/anchor-lfs/internal/sanitise"
 	"github.com/refringe/anchor-lfs/lfs"
 	"github.com/refringe/anchor-lfs/middleware"
@@ -62,6 +63,7 @@ func serve(configPath string) int {
 		Msg("starting anchor-lfs")
 	log.Info().
 		Str("listen_address", cfg.Options.ListenAddress).
+		Str("metrics_address", cfg.Options.MetricsAddress).
 		Int64("max_upload_size", cfg.Options.MaxUploadSize).
 		Uint64("rate_limit_tokens", cfg.Options.RateLimitTokens).
 		Str("rate_limit_window", cfg.Options.RateLimitWindow).
@@ -74,6 +76,8 @@ func serve(configPath string) int {
 	if err := ensureWritableDir(cfg.Options.DataDirectory); err != nil {
 		log.Fatal().Err(err).Int("uid", os.Getuid()).Int("gid", os.Getgid()).Msg("checking data directory")
 	}
+
+	serverMetrics := metrics.New(version, commit)
 
 	var store storage.Adapter
 	switch cfg.Storage.Backend {
@@ -99,7 +103,9 @@ func serve(configPath string) int {
 			Bool("presigned_urls", cfg.Storage.S3PresignedURLsEnabled()).
 			Msg("using S3 storage backend")
 	default:
-		store = storage.NewLocal(cfg.Options.DataDirectory)
+		local := storage.NewLocal(cfg.Options.DataDirectory)
+		serverMetrics.RegisterAvailableSpace(local.AvailableSpace)
+		store = local
 		log.Info().Str("path", cfg.Options.DataDirectory).Msg("using local storage backend")
 	}
 	checkCtx, cancelCheck := context.WithTimeout(context.Background(), storageCheckTimeout)
@@ -208,10 +214,14 @@ func serve(configPath string) int {
 			Msg("registered endpoint")
 	}
 
+	if len(githubAuths) > 0 {
+		serverMetrics.RegisterAuthCache(sumCacheStats(githubAuths))
+	}
+
 	registerServiceRoutes(mux, newReadiness(store, cfg.Options.DataDirectory))
 
 	server := &http.Server{
-		Handler: serverHandler(mux, proxyTrust, cfg.Options.AccessLogEnabled()),
+		Handler: serverHandler(mux, proxyTrust, cfg.Options.AccessLogEnabled(), serverMetrics),
 
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       120 * time.Second,
@@ -231,8 +241,9 @@ func serve(configPath string) int {
 	}
 	log.Info().Str("address", listener.Addr().String()).Msg("listening")
 
-	served := make(chan error, 1)
+	served := make(chan error, 2)
 	go func() { served <- server.Serve(listener) }()
+	metricsServer := serveMetrics(cfg.Options.MetricsAddress, serverMetrics, served)
 
 	sweepCtx, stopSweep := context.WithCancel(context.Background())
 	go sweepTempFiles(sweepCtx, cfg.Options.DataDirectory)
@@ -256,6 +267,9 @@ func serve(configPath string) int {
 		_ = server.Close()
 		exitCode = 1
 	}
+	if metricsServer != nil && metricsServer.Shutdown(ctx) != nil {
+		_ = metricsServer.Close()
+	}
 
 	_ = rateLimitStore.Close(ctx)
 
@@ -269,13 +283,43 @@ func serve(configPath string) int {
 	return exitCode
 }
 
-// serverHandler wraps mux with proxy trust, request IDs and, when accessLog is set, the access log.
-func serverHandler(mux http.Handler, proxyTrust *middleware.ProxyTrust, accessLog bool) http.Handler {
-	handler := mux
+// serverHandler wraps mux with proxy trust, request IDs, metrics and, when accessLog is set, the access log.
+func serverHandler(mux http.Handler, proxyTrust *middleware.ProxyTrust, accessLog bool, m *metrics.Metrics) http.Handler {
+	handler := m.Instrument(mux)
 	if accessLog {
 		handler = middleware.Logging(handler, "/health", "/ready")
 	}
 	return proxyTrust.Handler(middleware.RequestID(handler))
+}
+
+// serveMetrics serves m at /metrics on address, sending Serve's result to served, or returns nil if address is empty.
+func serveMetrics(address string, m *metrics.Metrics, served chan<- error) *http.Server {
+	if address == "" {
+		return nil
+	}
+	var listenConfig net.ListenConfig
+	listener, err := listenConfig.Listen(context.Background(), "tcp", address)
+	if err != nil {
+		log.Fatal().Err(err).Str("address", address).Msg("listening for metrics")
+	}
+	log.Info().Str("address", listener.Addr().String()).Msg("serving metrics")
+
+	mux := http.NewServeMux()
+	mux.Handle("GET /metrics", m.Handler())
+	server := &http.Server{Handler: mux, ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 120 * time.Second}
+	go func() { served <- server.Serve(listener) }()
+	return server
+}
+
+// sumCacheStats returns a function that adds up the cache hits and misses of every authenticator in auths.
+func sumCacheStats(auths map[string]*auth.GitHub) func() (hits, misses uint64) {
+	return func() (hits, misses uint64) {
+		for _, g := range auths {
+			h, m := g.CacheStats()
+			hits, misses = hits+h, misses+m
+		}
+		return hits, misses
+	}
 }
 
 // configureLogging applies the configured log format and level to the global logger.
