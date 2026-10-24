@@ -212,7 +212,7 @@ func (h *Handler) DownloadHandler(w http.ResponseWriter, r *http.Request) {
 	defer func() { _ = reader.Close() }()
 
 	w.Header().Set("Content-Type", "application/octet-stream")
-
+	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("ETag", `"`+oid+`"`)
 
 	// Seekable readers go through http.ServeContent, which answers Range, HEAD and If-None-Match requests.
@@ -681,6 +681,7 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 		return
 	}
 	w.Header().Set("Content-Type", lfsMediaType)
+	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(status)
 	_, _ = w.Write(data)
 }

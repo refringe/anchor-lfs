@@ -119,6 +119,9 @@ func TestBatchUploadNewObject(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d", w.Code)
 	}
+	if got := w.Header().Get("Cache-Control"); got != "no-store" {
+		t.Errorf("Cache-Control = %q, want %q", got, "no-store")
+	}
 
 	var resp BatchResponse
 	if err := json.UnmarshalRead(w.Body, &resp); err != nil {
@@ -255,6 +258,9 @@ func TestDownloadRangeConditionalAndHead(t *testing.T) {
 
 			if w.Code != tt.wantStatus || w.Body.String() != tt.wantBody {
 				t.Fatalf("got %d %q, want %d %q", w.Code, w.Body.String(), tt.wantStatus, tt.wantBody)
+			}
+			if got := w.Header().Get("Cache-Control"); got != "no-store" {
+				t.Errorf("Cache-Control = %q, want %q", got, "no-store")
 			}
 			for key, want := range tt.wantHeader {
 				if got := w.Header().Get(key); got != want[0] {
