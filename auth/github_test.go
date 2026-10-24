@@ -24,7 +24,7 @@ import (
 func mockGitHubAPI(t *testing.T, requestCount *atomic.Int64, perms map[string]bool) *httptest.Server {
 	t.Helper()
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Handle GET /user — return authenticated user info (not counted).
+		// GET /user returns the authenticated user and is not counted.
 		if r.URL.Path == "/api/v3/user" || r.URL.Path == "/user" {
 			authHeader := r.Header.Get("Authorization")
 			if authHeader == "" || authHeader == "Bearer bad-token" {
@@ -40,7 +40,7 @@ func mockGitHubAPI(t *testing.T, requestCount *atomic.Int64, perms map[string]bo
 			return
 		}
 
-		// All other endpoints (repos, etc.) — counted.
+		// Every other endpoint is counted.
 		requestCount.Add(1)
 
 		// Check for bearer token.

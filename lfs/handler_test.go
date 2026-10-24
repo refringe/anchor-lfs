@@ -1002,7 +1002,7 @@ func TestVerifyLocksHandler(t *testing.T) {
 		t.Fatalf("expected 201, got %d", w.Code)
 	}
 
-	// Verify locks — should appear in "ours" since same user.
+	// Verifying as the lock's owner lists the lock under "ours".
 	verifyBody, _ := json.Marshal(VerifyLocksRequest{})
 	verifyReq := httptest.NewRequestWithContext(context.Background(), "POST", "/org/repo/locks/verify", bytes.NewReader(verifyBody))
 	verifyReq.Header.Set("Accept", lfsMediaType)
@@ -1469,7 +1469,7 @@ func TestBatchMixedSuccessAndFailure(t *testing.T) {
 		t.Fatalf("expected 4 objects, got %d", len(resp.Objects))
 	}
 
-	// First object: success — should have download action.
+	// First object succeeds with a download action.
 	if resp.Objects[0].Error != nil {
 		t.Errorf("object 0: unexpected error %+v", resp.Objects[0].Error)
 	}
@@ -1609,7 +1609,7 @@ func TestUploadIdempotent(t *testing.T) {
 		t.Fatalf("first upload: expected 200, got %d", w.Code)
 	}
 
-	// Second upload of the same object — should succeed (idempotent).
+	// A second upload of the same object succeeds.
 	uri = signedURI(signer, opUpload, "/org/repo/objects/"+oid)
 	req = httptest.NewRequestWithContext(context.Background(), "PUT", uri, bytes.NewReader(data))
 	req.ContentLength = int64(len(data))

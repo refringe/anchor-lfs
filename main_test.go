@@ -53,7 +53,7 @@ func TestLoadOrGenerateSigningKeyCreatesFile(t *testing.T) {
 		t.Fatalf("second call: %v", err)
 	}
 	if !bytes.Equal(key1, key2) {
-		t.Fatal("key changed between calls — should be loaded from disk")
+		t.Fatal("key changed between calls, want the saved key loaded from disk")
 	}
 }
 
@@ -174,7 +174,7 @@ func TestIntegrationRouting(t *testing.T) {
 	hashBytes := sha256.Sum256(data)
 	oid := hex.EncodeToString(hashBytes[:])
 
-	// Batch upload request — get signed upload and verify URLs.
+	// Batch upload request returns signed upload and verify URLs.
 	uploadBatchBody, _ := json.Marshal(lfs.BatchRequest{
 		Operation: "upload",
 		Objects:   []lfs.Object{{OID: oid, Size: int64(len(data))}},
@@ -231,7 +231,7 @@ func TestIntegrationRouting(t *testing.T) {
 		t.Fatalf("verify: expected 200, got %d", resp.StatusCode)
 	}
 
-	// Batch download request — get signed download URL.
+	// Batch download request returns a signed download URL.
 	downloadBatchBody, _ := json.Marshal(lfs.BatchRequest{
 		Operation: "download",
 		Objects:   []lfs.Object{{OID: oid, Size: int64(len(data))}},

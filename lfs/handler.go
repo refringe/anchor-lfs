@@ -101,8 +101,7 @@ func (h *Handler) BatchHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// ParseMediaType error is intentionally discarded — a malformed
-	// Content-Type produces an empty mediaType, which fails the check below.
+	// A malformed Content-Type parses to an empty media type, which fails this check.
 	mediaType, _, _ := mime.ParseMediaType(r.Header.Get("Content-Type"))
 	if mediaType != lfsMediaType {
 		writeError(w, r, http.StatusUnsupportedMediaType, "expected Content-Type: "+lfsMediaType)
@@ -131,14 +130,12 @@ func (h *Handler) BatchHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Validate transfer adapters — if the client specifies a list, it must
-	// include "basic" (the only adapter this server supports).
+	// A client that lists transfer adapters must include "basic", the only one this server supports.
 	if len(req.Transfers) > 0 && !slices.ContainsFunc(req.Transfers, func(t string) bool { return strings.EqualFold(t, "basic") }) {
 		writeError(w, r, http.StatusUnprocessableEntity, "unsupported transfer adapter; only 'basic' is supported")
 		return
 	}
 
-	// Validate hash algorithm — only sha256 is supported.
 	if req.HashAlgo != "" && req.HashAlgo != "sha256" {
 		writeError(w, r, http.StatusConflict, "unsupported hash algorithm; only 'sha256' is supported")
 		return
