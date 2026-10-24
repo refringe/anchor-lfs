@@ -61,7 +61,7 @@ func (s *URLSigner) Sign(operation, baseURL, path string) SignedURL {
 	sig := base64.RawURLEncoding.EncodeToString(s.mac(operation, baseURL+path, exp))
 
 	return SignedURL{
-		Href:      fmt.Sprintf("%s%s?exp=%s&sig=%s", baseURL, path, exp, sig),
+		Href:      baseURL + path + "?exp=" + exp + "&sig=" + sig,
 		ExpiresIn: int64(s.expiry.Seconds()),
 		ExpiresAt: expiresAt.UTC().Format(time.RFC3339),
 	}
@@ -110,6 +110,6 @@ func (s *URLSigner) Verify(operation, baseURL, requestURI string) error {
 // mac returns the HMAC-SHA256 of the signature version, operation, target URL and expiry, one per line.
 func (s *URLSigner) mac(operation, target, exp string) []byte {
 	mac := hmac.New(sha256.New, s.key)
-	_, _ = fmt.Fprintf(mac, "%s\n%s\n%s\n%s", signatureVersion, operation, target, exp)
+	_, _ = mac.Write([]byte(signatureVersion + "\n" + operation + "\n" + target + "\n" + exp))
 	return mac.Sum(nil)
 }

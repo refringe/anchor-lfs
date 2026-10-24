@@ -16,6 +16,10 @@ const batchConcurrency = 16
 
 // processBatch builds the response for every object in req, in request order, stopping early if the client goes away.
 func (h *Handler) processBatch(r *http.Request, req *BatchRequest, baseURL string) *BatchResponse {
+	var verify Action
+	if req.Operation == opUpload {
+		verify = h.verifyAction(baseURL)
+	}
 	objects := make([]ObjectResponse, len(req.Objects))
 	slots := make(chan struct{}, batchConcurrency)
 	var wg sync.WaitGroup
@@ -28,7 +32,7 @@ func (h *Handler) processBatch(r *http.Request, req *BatchRequest, baseURL strin
 		started++
 		wg.Go(func() {
 			defer func() { <-slots }()
-			objects[i] = h.processObject(r, req.Operation, obj, baseURL)
+			objects[i] = h.processObject(r, req.Operation, obj, baseURL, verify)
 		})
 	}
 	wg.Wait()
@@ -40,8 +44,14 @@ func (h *Handler) processBatch(r *http.Request, req *BatchRequest, baseURL strin
 	}
 }
 
+// verifyAction returns the signed verify action that every object of one upload batch shares.
+func (h *Handler) verifyAction(baseURL string) Action {
+	signed := h.signer.Sign(opVerify, baseURL, h.endpoint.Path+"/objects/verify")
+	return Action{Href: signed.Href, ExpiresIn: signed.ExpiresIn, ExpiresAt: signed.ExpiresAt}
+}
+
 // processObject builds the response for one object of a batch request.
-func (h *Handler) processObject(r *http.Request, operation string, obj Object, baseURL string) ObjectResponse {
+func (h *Handler) processObject(r *http.Request, operation string, obj Object, baseURL string, verify Action) ObjectResponse {
 	if msg := validateObject(obj); msg != "" {
 		return ObjectResponse{
 			OID:   obj.OID,
@@ -52,7 +62,7 @@ func (h *Handler) processObject(r *http.Request, operation string, obj Object, b
 	if operation == opDownload {
 		return h.processDownload(r, obj, baseURL)
 	}
-	return h.processUpload(r, obj, baseURL)
+	return h.processUpload(r, obj, baseURL, verify)
 }
 
 func (h *Handler) processDownload(r *http.Request, obj Object, baseURL string) ObjectResponse {
@@ -107,7 +117,7 @@ func (h *Handler) processDownload(r *http.Request, obj Object, baseURL string) O
 	return resp
 }
 
-func (h *Handler) processUpload(r *http.Request, obj Object, baseURL string) ObjectResponse {
+func (h *Handler) processUpload(r *http.Request, obj Object, baseURL string, verify Action) ObjectResponse {
 	resp := ObjectResponse{OID: obj.OID, Size: obj.Size}
 
 	if obj.Size > h.maxUploadSize {
@@ -148,25 +158,17 @@ func (h *Handler) processUpload(r *http.Request, obj Object, baseURL string) Obj
 			resp.Error = &ObjectError{Code: 500, Message: msgInternalError}
 			return resp
 		}
-		verifyPath := fmt.Sprintf("%s/objects/verify", h.endpoint.Path)
-		signedVerify := h.signer.Sign(opVerify, baseURL, verifyPath)
 		resp.Authenticated = new(bool)
 		*resp.Authenticated = true
 		resp.Actions = map[string]Action{
 			opUpload: {Href: href, Header: header, ExpiresIn: int64(h.signer.Expiry().Seconds())},
-			opVerify: {
-				Href:      signedVerify.Href,
-				ExpiresIn: signedVerify.ExpiresIn,
-				ExpiresAt: signedVerify.ExpiresAt,
-			},
+			opVerify: verify,
 		}
 		return resp
 	}
 
 	uploadPath := fmt.Sprintf("%s/objects/%s", h.endpoint.Path, obj.OID)
-	verifyPath := fmt.Sprintf("%s/objects/verify", h.endpoint.Path)
 	signedUpload := h.signer.Sign(opUpload, baseURL, uploadPath)
-	signedVerify := h.signer.Sign(opVerify, baseURL, verifyPath)
 	resp.Authenticated = new(bool)
 	*resp.Authenticated = true
 	resp.Actions = map[string]Action{
@@ -175,11 +177,7 @@ func (h *Handler) processUpload(r *http.Request, obj Object, baseURL string) Obj
 			ExpiresIn: signedUpload.ExpiresIn,
 			ExpiresAt: signedUpload.ExpiresAt,
 		},
-		opVerify: {
-			Href:      signedVerify.Href,
-			ExpiresIn: signedVerify.ExpiresIn,
-			ExpiresAt: signedVerify.ExpiresAt,
-		},
+		opVerify: verify,
 	}
 	return resp
 }
