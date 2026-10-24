@@ -16,24 +16,24 @@ Always run these commands from the repository root. The `Makefile` is the single
 | Build | `make build` | Output: `bin/anchor-lfs` |
 | Release archives | `make dist` | Archives for linux, darwin and windows on amd64 and arm64, plus `checksums.txt`, in `dist/` |
 | Run tests | `make test` | Runs `go test -race ./...` |
-| Lint | `make lint` | Runs `go tool golangci-lint run ./...` |
+| Lint | `make lint` | Runs `go tool -modfile=tools/go.mod golangci-lint run ./...` |
 | Format check | `make fmt-check` | Fails if any Go file needs formatting |
 | Format fix | `make fmt` | Runs `gofmt -w .` |
 | Prettier check | `make prettier-check` | Fails if any JSON/YAML file needs formatting |
 | Prettier fix | `make prettier` | Runs `prettier --write` over JSON/YAML |
 | Vet | `make vet` | `go vet` for linux, darwin and windows; also run in CI |
-| Vulnerability scan | `make vulncheck` | `go tool govulncheck` (pinned in `go.mod`) |
-| Tidy check | `go mod tidy && git diff --exit-code go.mod go.sum` | CI rejects untidy modules |
+| Vulnerability scan | `make vulncheck` | `go tool -modfile=tools/go.mod govulncheck` (pinned in `tools/go.mod`) |
+| Tidy check | `make tidy && git diff --exit-code go.mod go.sum tools/go.mod tools/go.sum` | CI rejects untidy modules |
 | Full check | `make check` | Runs: fmt-check, prettier-check, lint, vet, vulncheck, test |
 
-**Always run `make fmt` before committing.** Always run `make test` and `make lint` to validate changes. If you add or remove dependencies, run `go mod tidy` and include both `go.mod` and `go.sum` in the commit.
+**Always run `make fmt` before committing.** Always run `make test` and `make lint` to validate changes. If you add or remove dependencies, run `make tidy` and include both `go.mod` and `go.sum` in the commit.
 
 ## CI Pipelines (GitHub Actions)
 
 Six workflows run on every push/PR to `develop` and `main` (in `.github/workflows/`):
 
 1. **Format** (`format.yml`): jobs `Go Format` (`make fmt-check`) and `Prettier` (`make prettier-check`)
-2. **Quality** (`quality.yml`): job `Lint`: `go mod tidy` cleanliness check, no-`replace`-directive check, `make vet` (linux, darwin and windows), `make lint`
+2. **Quality** (`quality.yml`): job `Lint`: `make tidy` cleanliness check for both modules, no-`replace`-directive check, `make vet` (linux, darwin and windows), `make lint`
 3. **Tests** (`tests.yml`): jobs `Test` (`make test`), `Coverage` (`make test-cover`, uploads `coverage.out` as an artifact) and `S3 Integration` (runs `TestS3Integration*` against a RustFS container)
 4. **Vulnerability** (`vulnerability.yml`): job `Vulnerability Check` (`make vulncheck`); also runs weekly (Monday 06:23 UTC) and on demand
 5. **CodeQL** (`codeql.yml`): job `Analyse`, matrix over `actions` and `go`; also runs weekly (Monday 06:23 UTC) and on demand
@@ -121,6 +121,7 @@ The job display names above are the required status check contexts in the reposi
 │   ├── sanitise/           # Path sanitisation for endpoint directory names (letters, digits, ., _, -; no leading dot)
 │   └── testutil/           # Shared test helpers (e.g., SHA-256 computation)
 ├── Makefile                # All build/test/lint commands
+├── tools/go.mod            # Separate module pinning golangci-lint and govulncheck as tool dependencies
 ├── .golangci.yml           # Linter configuration (23 linters, UK English)
 ├── .prettierrc.json        # Prettier configuration (JSON/YAML formatting)
 ├── config.toml.example     # Example configuration file

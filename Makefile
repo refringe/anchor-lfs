@@ -39,7 +39,7 @@ test-cover:
 	go tool cover -func=coverage.out
 
 lint:
-	go tool golangci-lint run ./...
+	go tool -modfile=tools/go.mod golangci-lint run ./...
 
 vet:
 	GOOS=linux go vet ./...
@@ -59,13 +59,14 @@ prettier-check:
 	npx --yes prettier@3 --check '**/*.json' '**/*.yml'
 
 vulncheck:
-	go tool govulncheck ./...
+	go tool -modfile=tools/go.mod govulncheck ./...
 
 check: fmt-check prettier-check lint vet vulncheck test
 
 # Dependencies
 tidy:
 	go mod tidy
+	go -C tools mod tidy
 
 # Docker
 docker-build:
