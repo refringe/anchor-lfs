@@ -57,6 +57,39 @@ func TestRemoveStaleTempFiles(t *testing.T) {
 	}
 }
 
+func TestRemoveStaleTempFilesSkipsUnreadableDirectories(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root can read every directory")
+	}
+	dir := t.TempDir()
+	unreadable := filepath.Join(dir, "lost+found")
+	if err := os.Mkdir(unreadable, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	stale := filepath.Join(dir, "org_repo", TempFilePrefix+"123")
+	if err := os.MkdirAll(filepath.Dir(stale), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(stale, []byte("data"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	twoHoursAgo := time.Now().Add(-2 * time.Hour)
+	if err := os.Chtimes(stale, twoHoursAgo, twoHoursAgo); err != nil {
+		t.Fatal(err)
+	}
+
+	removed, err := RemoveStaleTempFiles(dir, time.Hour)
+	if err != nil {
+		t.Fatalf("RemoveStaleTempFiles: %v", err)
+	}
+	if removed != 1 {
+		t.Errorf("removed = %d, want 1", removed)
+	}
+	if _, err := os.Stat(stale); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("stale temporary file %s still exists (stat error %v)", stale, err)
+	}
+}
+
 func TestRemoveStaleTempFilesIgnoresSymlinks(t *testing.T) {
 	dir, outside := t.TempDir(), t.TempDir()
 	target := filepath.Join(outside, TempFilePrefix+"outside")

@@ -22,9 +22,16 @@ func RemoveStaleTempFiles(dir string, olderThan time.Duration) (int, error) {
 
 	cutoff := time.Now().Add(-olderThan)
 	removed := 0
+	var problems []error
 	err = fs.WalkDir(root.FS(), ".", func(path string, entry fs.DirEntry, err error) error {
 		if err != nil {
-			return err
+			if path == "." {
+				return err
+			}
+			if !errors.Is(err, fs.ErrPermission) {
+				problems = append(problems, err)
+			}
+			return fs.SkipDir
 		}
 		if !entry.Type().IsRegular() || !strings.HasPrefix(entry.Name(), TempFilePrefix) {
 			return nil
@@ -34,18 +41,22 @@ func RemoveStaleTempFiles(dir string, olderThan time.Duration) (int, error) {
 			return nil
 		}
 		if err != nil {
-			return err
+			problems = append(problems, err)
+			return nil
 		}
 		if info.ModTime().After(cutoff) {
 			return nil
 		}
-		if err := root.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
-			return err
+		if err := root.Remove(path); err != nil {
+			if !errors.Is(err, fs.ErrNotExist) {
+				problems = append(problems, err)
+			}
+			return nil
 		}
 		removed++
 		return nil
 	})
-	if err != nil {
+	if err = errors.Join(append(problems, err)...); err != nil {
 		return removed, fmt.Errorf("removing stale temporary files: %w", err)
 	}
 	return removed, nil
