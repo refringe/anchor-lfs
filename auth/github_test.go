@@ -514,6 +514,8 @@ func TestContentsProbes(t *testing.T) {
 	}{
 		{name: "upload with write access", perms: admin, op: OperationUpload,
 			want: Result{Authenticated: true, Authorized: true, Username: "testuser", Maintainer: true}, wantProbes: 1},
+		{name: "upload to empty repository", perms: admin, writeStatus: http.StatusConflict, op: OperationUpload,
+			want: Result{Authenticated: true, Authorized: true, Username: "testuser", Maintainer: true}, wantProbes: 1},
 		{name: "upload with read-only token", perms: admin, writeStatus: http.StatusForbidden, op: OperationUpload,
 			want: Result{Authenticated: true, Username: "testuser"}, wantProbes: 1},
 		{name: "upload with token for another repository", perms: admin, writeStatus: http.StatusNotFound, op: OperationUpload,
