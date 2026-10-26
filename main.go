@@ -250,15 +250,7 @@ func serve(configPath string) int {
 	sweepCtx, stopSweep := context.WithCancel(context.Background())
 	go sweepTempFiles(sweepCtx, cfg.Options.DataDirectory, tempFileInUse)
 
-	exitCode := 0
-	select {
-	case <-signalled.Done():
-		stopSignals() // A second SIGINT or SIGTERM now ends the process at once.
-		log.Info().Str("timeout", cfg.Options.ShutdownTimeout).Msg("shutting down; send the signal again to stop immediately")
-	case err := <-served:
-		log.Error().Err(err).Msg("server error")
-		exitCode = 1
-	}
+	exitCode := awaitStop(signalled, stopSignals, served, cfg.Options.ShutdownTimeout)
 	stopSweep()
 
 	ctx, cancel := context.WithTimeout(context.Background(), cfg.Options.ShutdownTimeoutDuration)
@@ -379,6 +371,20 @@ func registerRoutes(mux *http.ServeMux, prefix string, handler *lfs.Handler, rat
 	mux.HandleFunc(fmt.Sprintf("GET %s/objects/{oid}", prefix), handler.DownloadHandler)
 	mux.HandleFunc(fmt.Sprintf("PUT %s/objects/{oid}", prefix), handler.UploadHandler)
 	mux.HandleFunc(fmt.Sprintf("POST %s/objects/verify", prefix), handler.VerifyHandler)
+}
+
+// awaitStop waits for a signal or a Serve failure, restores default signal handling and returns the exit code.
+func awaitStop(signalled context.Context, stopSignals context.CancelFunc, served <-chan error, shutdownTimeout string) int {
+	select {
+	case <-signalled.Done():
+		stopSignals()
+		log.Info().Str("timeout", shutdownTimeout).Msg("shutting down; send the signal again to stop immediately")
+		return 0
+	case err := <-served:
+		stopSignals()
+		log.Error().Err(err).Msg("server error")
+		return 1
+	}
 }
 
 // ensureWritableDir creates dir if it is missing and confirms the current process can create files in it.
