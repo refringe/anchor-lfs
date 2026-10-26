@@ -2,6 +2,7 @@ package auth
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/json/v2"
 	"errors"
@@ -10,6 +11,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -37,6 +39,17 @@ func mockGitHubAPI(t *testing.T, requestCount *atomic.Int64, perms map[string]bo
 				"login": "testuser",
 				"id":    42,
 			})
+			return
+		}
+
+		// The contents probes answer as for a token that may read and write, and are not counted.
+		switch {
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/git/blobs"):
+			w.WriteHeader(http.StatusUnprocessableEntity)
+			_ = json.MarshalWrite(w, map[string]string{"message": "Validation Failed"})
+			return
+		case strings.HasSuffix(r.URL.Path, "/commits"):
+			_ = json.MarshalWrite(w, []any{})
 			return
 		}
 
@@ -83,16 +96,27 @@ func newGitHubAuth(serverURL string, cacheTTL time.Duration) *GitHub {
 
 // fakeGitHub is an in-memory GitHub API that counts requests and, when release is set, holds them until it is closed.
 type fakeGitHub struct {
-	perms     map[string]bool
-	release   chan struct{}
-	repoCalls atomic.Int64
-	userCalls atomic.Int64
+	perms   map[string]bool
+	private bool
+
+	// Contents probe statuses; zero answers 200 to the read probe and 422 to the write probe.
+	readStatus  int
+	writeStatus int
+
+	release    chan struct{}
+	repoCalls  atomic.Int64
+	userCalls  atomic.Int64
+	probeCalls atomic.Int64
 }
 
 func (f *fakeGitHub) RoundTrip(r *http.Request) (*http.Response, error) {
-	if r.URL.Path == "/user" {
+	isProbe := strings.HasSuffix(r.URL.Path, "/commits") || strings.HasSuffix(r.URL.Path, "/git/blobs")
+	switch {
+	case r.URL.Path == "/user":
 		f.userCalls.Add(1)
-	} else {
+	case isProbe:
+		f.probeCalls.Add(1)
+	default:
 		f.repoCalls.Add(1)
 	}
 	if f.release != nil {
@@ -103,12 +127,19 @@ func (f *fakeGitHub) RoundTrip(r *http.Request) (*http.Response, error) {
 		}
 	}
 
-	status, body := http.StatusOK, any(map[string]any{"id": 1, "full_name": "org/repo", "permissions": f.perms})
+	status, body := http.StatusOK, any(map[string]any{"id": 1, "full_name": "org/repo", "private": f.private, "permissions": f.perms})
 	switch {
 	case r.Header.Get("Authorization") != "Bearer good-token":
 		status, body = http.StatusUnauthorized, map[string]string{"message": "Bad credentials"}
 	case r.URL.Path == "/user":
 		body = map[string]any{"login": "testuser", "id": 42}
+	case strings.HasSuffix(r.URL.Path, "/commits"):
+		status, body = cmp.Or(f.readStatus, http.StatusOK), []any{}
+		if status != http.StatusOK {
+			body = map[string]string{"message": http.StatusText(status)}
+		}
+	case strings.HasSuffix(r.URL.Path, "/git/blobs"):
+		status, body = cmp.Or(f.writeStatus, http.StatusUnprocessableEntity), map[string]string{"message": "probe"}
 	}
 	data, err := json.Marshal(body)
 	if err != nil {
@@ -315,8 +346,8 @@ func TestConcurrentLookupsShareOneCall(t *testing.T) {
 				t.Errorf("result %d = %+v, want authorised testuser", i, r)
 			}
 		}
-		if repo, user := fake.repoCalls.Load(), fake.userCalls.Load(); repo != 1 || user != 1 {
-			t.Errorf("GitHub calls = %d repository and %d user, want 1 of each", repo, user)
+		if repo, user, probes := fake.repoCalls.Load(), fake.userCalls.Load(), fake.probeCalls.Load(); repo != 1 || user != 1 || probes != 1 {
+			t.Errorf("GitHub calls = %d repository, %d user and %d probe, want 1 of each", repo, user, probes)
 		}
 	})
 }
@@ -464,6 +495,88 @@ func TestMaintainerFromRepositoryPermissions(t *testing.T) {
 				t.Errorf("Authorized = %t, Maintainer = %t; want true, %t", r.Authorized, r.Maintainer, tt.want)
 			}
 		})
+	}
+}
+
+func TestContentsProbes(t *testing.T) {
+	admin := map[string]bool{"pull": true, "push": true, "admin": true}
+	tests := []struct {
+		name            string
+		perms           map[string]bool
+		private         bool
+		readStatus      int
+		writeStatus     int
+		op              Operation
+		want            Result
+		wantProbes      int64
+		wantUnavailable bool
+		wantRateLimited bool
+	}{
+		{name: "upload with write access", perms: admin, op: OperationUpload,
+			want: Result{Authenticated: true, Authorized: true, Username: "testuser", Maintainer: true}, wantProbes: 1},
+		{name: "upload with read-only token", perms: admin, writeStatus: http.StatusForbidden, op: OperationUpload,
+			want: Result{Authenticated: true, Username: "testuser"}, wantProbes: 1},
+		{name: "upload with token for another repository", perms: admin, writeStatus: http.StatusNotFound, op: OperationUpload,
+			want: Result{Authenticated: true, Username: "testuser"}, wantProbes: 1},
+		{name: "upload without push role", perms: map[string]bool{"pull": true}, op: OperationUpload,
+			want: Result{Authenticated: true, Username: "testuser"}},
+		{name: "private download with contents access", perms: admin, private: true, op: OperationDownload,
+			want: Result{Authenticated: true, Authorized: true, Username: "testuser"}, wantProbes: 1},
+		{name: "private download of empty repository", perms: admin, private: true, readStatus: http.StatusConflict, op: OperationDownload,
+			want: Result{Authenticated: true, Authorized: true, Username: "testuser"}, wantProbes: 1},
+		{name: "private download without contents access", perms: admin, private: true, readStatus: http.StatusForbidden, op: OperationDownload,
+			want: Result{Authenticated: true, Username: "testuser"}, wantProbes: 1},
+		{name: "public repository download", perms: map[string]bool{"pull": true}, op: OperationDownload,
+			want: Result{Authenticated: true, Authorized: true, Username: "testuser"}},
+		{name: "probe server error", perms: admin, writeStatus: http.StatusBadGateway, op: OperationUpload,
+			wantProbes: 2, wantUnavailable: true},
+		{name: "probe rate limited", perms: admin, writeStatus: http.StatusTooManyRequests, op: OperationUpload,
+			wantProbes: 2, wantRateLimited: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fake := &fakeGitHub{perms: tt.perms, private: tt.private, readStatus: tt.readStatus, writeStatus: tt.writeStatus}
+			g := newFakeGitHubAuth(fake, time.Minute)
+			defer func() { _ = g.Close() }()
+
+			for range 2 {
+				result, err := g.Authenticate(t.Context(), testEndpoint(), "", "good-token", tt.op)
+				_, isRateLimited := errors.AsType[*RateLimitedError](err)
+				switch {
+				case tt.wantUnavailable:
+					if !errors.Is(err, ErrUnavailable) {
+						t.Fatalf("error = %v, want ErrUnavailable", err)
+					}
+				case tt.wantRateLimited:
+					if !isRateLimited {
+						t.Fatalf("error = %v, want RateLimitedError", err)
+					}
+				case err != nil:
+					t.Fatalf("Authenticate: %v", err)
+				}
+				if result != tt.want {
+					t.Errorf("result = %+v, want %+v", result, tt.want)
+				}
+			}
+			if got := fake.probeCalls.Load(); got != tt.wantProbes {
+				t.Errorf("probe calls = %d, want %d", got, tt.wantProbes)
+			}
+		})
+	}
+}
+
+func TestContentsProbesShareOneLookup(t *testing.T) {
+	fake := &fakeGitHub{perms: map[string]bool{"pull": true, "push": true}, private: true}
+	g := newFakeGitHubAuth(fake, time.Minute)
+	defer func() { _ = g.Close() }()
+
+	for _, op := range []Operation{OperationUpload, OperationDownload, OperationUpload, OperationDownload} {
+		if r, err := g.Authenticate(t.Context(), testEndpoint(), "", "good-token", op); err != nil || !r.Authorized {
+			t.Fatalf("Authenticate(%s) = %+v, %v; want authorised", op, r, err)
+		}
+	}
+	if repo, user, probes := fake.repoCalls.Load(), fake.userCalls.Load(), fake.probeCalls.Load(); repo != 1 || user != 1 || probes != 2 {
+		t.Errorf("GitHub calls = %d repository, %d user and %d probe, want 1, 1 and 2", repo, user, probes)
 	}
 }
 
