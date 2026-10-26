@@ -9,7 +9,9 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/refringe/anchor-lfs/internal/sanitise"
 	"github.com/refringe/anchor-lfs/internal/testutil"
@@ -190,6 +192,70 @@ func TestPutCleansUpOnFailure(t *testing.T) {
 	})
 	if err != nil && !os.IsNotExist(err) {
 		t.Fatalf("WalkDir: %v", err)
+	}
+}
+
+// pausingReader returns head, then closes paused and waits for resume before returning tail.
+type pausingReader struct {
+	head, tail     io.Reader
+	paused, resume chan struct{}
+	once           sync.Once
+}
+
+func (r *pausingReader) Read(p []byte) (int, error) {
+	if n, err := r.head.Read(p); !errors.Is(err, io.EOF) {
+		return n, err
+	}
+	r.once.Do(func() {
+		close(r.paused)
+		<-r.resume
+	})
+	return r.tail.Read(p)
+}
+
+func TestPutTempFileSurvivesSweepWhileWriting(t *testing.T) {
+	store := testStore(t)
+	data := []byte("hello world")
+	oid := testutil.SHA256Hex(data)
+	body := &pausingReader{head: bytes.NewReader(data[:5]), tail: bytes.NewReader(data[5:]),
+		paused: make(chan struct{}), resume: make(chan struct{})}
+
+	done := make(chan error, 1)
+	go func() { done <- store.Put(t.Context(), "/org/repo", oid, body, -1) }()
+	select {
+	case <-body.paused:
+	case err := <-done:
+		t.Fatalf("Put returned before reading the whole body: %v", err)
+	}
+
+	matches, err := filepath.Glob(filepath.Join(store.basePath, "org_repo", oid[:2], oid[2:4], TempFilePrefix+"*"))
+	if err != nil || len(matches) != 1 {
+		close(body.resume)
+		t.Fatalf("temporary files = %v (error %v), want one", matches, err)
+	}
+	twoHoursAgo := time.Now().Add(-2 * time.Hour)
+	if err := os.Chtimes(matches[0], twoHoursAgo, twoHoursAgo); err != nil {
+		t.Fatal(err)
+	}
+	rel, err := filepath.Rel(store.basePath, matches[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.ToSlash(rel)
+	if !store.Writing(path) {
+		t.Errorf("Writing(%q) = false during Put", path)
+	}
+	removed, err := RemoveStaleTempFiles(store.basePath, time.Hour, store.Writing)
+	if err != nil || removed != 0 {
+		t.Errorf("RemoveStaleTempFiles = %d, %v; want 0, nil", removed, err)
+	}
+
+	close(body.resume)
+	if err := <-done; err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	if store.Writing(path) {
+		t.Errorf("Writing(%q) = true after Put returned", path)
 	}
 }
 

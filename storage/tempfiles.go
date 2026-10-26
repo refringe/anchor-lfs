@@ -12,8 +12,8 @@ import (
 // TempFilePrefix starts the name of every temporary file written under the data directory.
 const TempFilePrefix = ".tmp-"
 
-// RemoveStaleTempFiles deletes temporary files under dir unmodified for over olderThan and returns how many it removed.
-func RemoveStaleTempFiles(dir string, olderThan time.Duration) (int, error) {
+// RemoveStaleTempFiles deletes and counts temporary files under dir unmodified for over olderThan and not inUse.
+func RemoveStaleTempFiles(dir string, olderThan time.Duration, inUse func(path string) bool) (int, error) {
 	root, err := os.OpenRoot(dir)
 	if err != nil {
 		return 0, fmt.Errorf("removing stale temporary files: %w", err)
@@ -34,6 +34,9 @@ func RemoveStaleTempFiles(dir string, olderThan time.Duration) (int, error) {
 			return fs.SkipDir
 		}
 		if !entry.Type().IsRegular() || !strings.HasPrefix(entry.Name(), TempFilePrefix) {
+			return nil
+		}
+		if inUse != nil && inUse(path) {
 			return nil
 		}
 		info, err := entry.Info()

@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"github.com/refringe/anchor-lfs/internal/sanitise"
 )
@@ -41,11 +42,39 @@ func CheckWritableDir(dir string) error {
 // Local stores objects on the local filesystem.
 type Local struct {
 	basePath string
+
+	mu      sync.Mutex
+	writing map[string]struct{}
 }
 
 // NewLocal creates a Local storage adapter rooted at basePath.
 func NewLocal(basePath string) *Local {
-	return &Local{basePath: basePath}
+	return &Local{basePath: basePath, writing: make(map[string]struct{})}
+}
+
+// Writing reports whether path, slash-separated and relative to basePath, is a temporary file Put is still writing.
+func (l *Local) Writing(path string) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	_, ok := l.writing[path]
+	return ok
+}
+
+// trackWriting marks tmpPath as being written until the returned function is called.
+func (l *Local) trackWriting(tmpPath string) (done func()) {
+	rel, err := filepath.Rel(l.basePath, tmpPath)
+	if err != nil {
+		return func() {}
+	}
+	key := filepath.ToSlash(rel)
+	l.mu.Lock()
+	l.writing[key] = struct{}{}
+	l.mu.Unlock()
+	return func() {
+		l.mu.Lock()
+		delete(l.writing, key)
+		l.mu.Unlock()
+	}
 }
 
 // Check confirms the storage directory accepts new files and its free space can be read.
@@ -121,6 +150,8 @@ func (l *Local) Put(ctx context.Context, endpoint, oid string, reader io.Reader,
 		return fmt.Errorf("creating temp file: %w", err)
 	}
 	tmpPath := tmp.Name()
+	untrack := l.trackWriting(tmpPath)
+	defer untrack()
 	closed := false
 	defer func() {
 		if !closed {

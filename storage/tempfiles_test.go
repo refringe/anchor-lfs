@@ -38,7 +38,7 @@ func TestRemoveStaleTempFiles(t *testing.T) {
 		writeFile("signing.key", twoHoursAgo),
 	}
 
-	removed, err := RemoveStaleTempFiles(dir, time.Hour)
+	removed, err := RemoveStaleTempFiles(dir, time.Hour, nil)
 	if err != nil {
 		t.Fatalf("RemoveStaleTempFiles: %v", err)
 	}
@@ -78,7 +78,7 @@ func TestRemoveStaleTempFilesSkipsUnreadableDirectories(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	removed, err := RemoveStaleTempFiles(dir, time.Hour)
+	removed, err := RemoveStaleTempFiles(dir, time.Hour, nil)
 	if err != nil {
 		t.Fatalf("RemoveStaleTempFiles: %v", err)
 	}
@@ -87,6 +87,39 @@ func TestRemoveStaleTempFilesSkipsUnreadableDirectories(t *testing.T) {
 	}
 	if _, err := os.Stat(stale); !errors.Is(err, fs.ErrNotExist) {
 		t.Errorf("stale temporary file %s still exists (stat error %v)", stale, err)
+	}
+}
+
+func TestRemoveStaleTempFilesKeepsFilesInUse(t *testing.T) {
+	dir := t.TempDir()
+	twoHoursAgo := time.Now().Add(-2 * time.Hour)
+	busy := filepath.Join(dir, "org_repo", TempFilePrefix+"busy")
+	idle := filepath.Join(dir, "org_repo", TempFilePrefix+"idle")
+	if err := os.MkdirAll(filepath.Dir(busy), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{busy, idle} {
+		if err := os.WriteFile(path, []byte("data"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chtimes(path, twoHoursAgo, twoHoursAgo); err != nil {
+			t.Fatal(err)
+		}
+	}
+	inUse := func(path string) bool { return path == "org_repo/"+TempFilePrefix+"busy" }
+
+	removed, err := RemoveStaleTempFiles(dir, time.Hour, inUse)
+	if err != nil {
+		t.Fatalf("RemoveStaleTempFiles: %v", err)
+	}
+	if removed != 1 {
+		t.Errorf("removed = %d, want 1", removed)
+	}
+	if _, err := os.Stat(busy); err != nil {
+		t.Errorf("temporary file in use was removed: %v", err)
+	}
+	if _, err := os.Stat(idle); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("stale temporary file %s still exists (stat error %v)", idle, err)
 	}
 }
 
@@ -107,7 +140,7 @@ func TestRemoveStaleTempFilesIgnoresSymlinks(t *testing.T) {
 		t.Skipf("creating symlink: %v", err)
 	}
 
-	removed, err := RemoveStaleTempFiles(dir, time.Hour)
+	removed, err := RemoveStaleTempFiles(dir, time.Hour, nil)
 	if err != nil {
 		t.Fatalf("RemoveStaleTempFiles: %v", err)
 	}
@@ -120,7 +153,7 @@ func TestRemoveStaleTempFilesIgnoresSymlinks(t *testing.T) {
 }
 
 func TestRemoveStaleTempFilesMissingDirectory(t *testing.T) {
-	if _, err := RemoveStaleTempFiles(filepath.Join(t.TempDir(), "missing"), time.Hour); err == nil {
+	if _, err := RemoveStaleTempFiles(filepath.Join(t.TempDir(), "missing"), time.Hour, nil); err == nil {
 		t.Error("RemoveStaleTempFiles on a missing directory succeeded")
 	}
 }

@@ -80,6 +80,7 @@ func serve(configPath string) int {
 	serverMetrics := metrics.New(version, commit)
 
 	var store storage.Adapter
+	var tempFileInUse func(path string) bool
 	switch cfg.Storage.Backend {
 	case config.StorageS3:
 		s3Store, err := storage.NewS3(context.Background(), storage.S3Config{
@@ -106,6 +107,7 @@ func serve(configPath string) int {
 		local := storage.NewLocal(cfg.Options.DataDirectory)
 		serverMetrics.RegisterAvailableSpace(local.AvailableSpace)
 		store = local
+		tempFileInUse = local.Writing
 		log.Info().Str("path", cfg.Options.DataDirectory).Msg("using local storage backend")
 	}
 	checkCtx, cancelCheck := context.WithTimeout(context.Background(), storageCheckTimeout)
@@ -246,7 +248,7 @@ func serve(configPath string) int {
 	metricsServer := serveMetrics(cfg.Options.MetricsAddress, serverMetrics, served)
 
 	sweepCtx, stopSweep := context.WithCancel(context.Background())
-	go sweepTempFiles(sweepCtx, cfg.Options.DataDirectory)
+	go sweepTempFiles(sweepCtx, cfg.Options.DataDirectory, tempFileInUse)
 
 	exitCode := 0
 	select {
@@ -396,12 +398,12 @@ const (
 	tempSweepInterval = time.Hour
 )
 
-// sweepTempFiles removes stale temporary files from dataDir now and then every tempSweepInterval until ctx ends.
-func sweepTempFiles(ctx context.Context, dataDir string) {
+// sweepTempFiles removes stale temporary files not inUse from dataDir now and every tempSweepInterval until ctx ends.
+func sweepTempFiles(ctx context.Context, dataDir string, inUse func(path string) bool) {
 	ticker := time.NewTicker(tempSweepInterval)
 	defer ticker.Stop()
 	for {
-		removed, err := storage.RemoveStaleTempFiles(dataDir, tempFileMaxAge)
+		removed, err := storage.RemoveStaleTempFiles(dataDir, tempFileMaxAge, inUse)
 		if err != nil {
 			log.Warn().Err(err).Int("removed", removed).Msg("sweeping temporary files")
 		} else if removed > 0 {
