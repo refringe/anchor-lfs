@@ -247,6 +247,10 @@ func (g *GitHub) probeContents(ctx context.Context, endpoint *config.Endpoint, t
 		// Creating an empty blob always fails: with 422 if the token may write, or with 403 or 404 if it may not.
 		_, _, err = client.Git.CreateBlob(ctx, endpoint.GitHubOwner, endpoint.GitHubRepo, &github.Blob{})
 	}
+	if isUnauthorized(err) {
+		g.cacheStoreIfEnabled(key, access{})
+		return access{}, nil
+	}
 	outcome, err := probeOutcome(err)
 	if err != nil {
 		return access{}, err
@@ -255,7 +259,13 @@ func (g *GitHub) probeContents(ctx context.Context, endpoint *config.Endpoint, t
 	return acc.withProbe(op, outcome), nil
 }
 
-// probeOutcome maps a probe error to allowed (none, 409, 422) or denied (401, 403, 404), or returns GitHub's failure.
+// isUnauthorized reports whether err is GitHub rejecting the token itself.
+func isUnauthorized(err error) bool {
+	respErr, ok := errors.AsType[*github.ErrorResponse](err)
+	return ok && respErr.Response != nil && respErr.Response.StatusCode == http.StatusUnauthorized
+}
+
+// probeOutcome maps a probe error to allowed (none, 409, 422) or denied (403, 404), or returns GitHub's failure.
 func probeOutcome(err error) (probe, error) {
 	if err == nil {
 		return probeAllowed, nil
