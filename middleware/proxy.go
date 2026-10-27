@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/http"
 	"slices"
+	"strings"
 
 	"github.com/realclientip/realclientip-go"
 )
@@ -42,6 +43,8 @@ func (p *ProxyTrust) Handler(next http.Handler) http.Handler {
 		if p.trusts(ip) {
 			if forwarded := p.strategy.ClientIP(r.Header, r.RemoteAddr); forwarded != "" {
 				ip = forwarded
+			} else if leftmost := p.leftmostIfAllTrusted(r.Header); leftmost != "" {
+				ip = leftmost
 			}
 		} else {
 			for _, name := range proxyHeaders {
@@ -58,7 +61,29 @@ func (p *ProxyTrust) trusts(ip string) bool {
 	if err != nil {
 		return false
 	}
-	return slices.ContainsFunc(p.trusted, func(n net.IPNet) bool { return n.Contains(addr.IP) })
+	return p.trustsIP(addr.IP)
+}
+
+// trustsIP reports whether ip falls within a trusted proxy range.
+func (p *ProxyTrust) trustsIP(ip net.IP) bool {
+	return slices.ContainsFunc(p.trusted, func(n net.IPNet) bool { return n.Contains(ip) })
+}
+
+// leftmostIfAllTrusted returns the first X-Forwarded-For address when every listed address is a valid trusted one.
+func (p *ProxyTrust) leftmostIfAllTrusted(h http.Header) string {
+	var leftmost string
+	for _, value := range h.Values("X-Forwarded-For") {
+		for item := range strings.SplitSeq(value, ",") {
+			addr, err := realclientip.ParseIPAddr(strings.TrimSpace(item))
+			if err != nil || addr.IP.IsUnspecified() || !p.trustsIP(addr.IP) {
+				return ""
+			}
+			if leftmost == "" {
+				leftmost = addr.String()
+			}
+		}
+	}
+	return leftmost
 }
 
 // peerIP returns the IP address of the connection's remote end, without its port.
