@@ -17,10 +17,20 @@ const lockfileExclusiveLock = 0x2
 
 // lockFile blocks until it holds an exclusive lock on the first byte of f.
 func lockFile(f *os.File) error {
+	return lockFileEx(f, lockfileExclusiveLock)
+}
+
+// lockFileShared blocks until it holds a shared lock on the first byte of f.
+func lockFileShared(f *os.File) error {
+	return lockFileEx(f, 0)
+}
+
+// lockFileEx blocks until it holds a lock on the first byte of f, taken with the given LockFileEx flags.
+func lockFileEx(f *os.File, flags uintptr) error {
 	var ol syscall.Overlapped
 	ret, _, callErr := procLockFileEx.Call(
 		f.Fd(),
-		lockfileExclusiveLock,
+		flags,
 		0,
 		1,
 		0,

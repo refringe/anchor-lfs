@@ -50,6 +50,37 @@ func TestFileLockStoreCreateAndList(t *testing.T) {
 	}
 }
 
+func TestFileLockStoreListWaitsForFileLock(t *testing.T) {
+	dir := t.TempDir()
+	writer := NewFileLockStore(dir)
+	if _, err := writer.Create(t.Context(), "/repo", "a.txt", "alice"); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	release, err := writer.acquireFileLock("/repo", lockFile)
+	if err != nil {
+		t.Fatalf("acquireFileLock: %v", err)
+	}
+
+	listed := make(chan int, 1)
+	go func() {
+		locks, _, err := NewFileLockStore(dir).List(t.Context(), "/repo", ListLocksOptions{})
+		if err != nil {
+			t.Errorf("List: %v", err)
+		}
+		listed <- len(locks)
+	}()
+
+	select {
+	case <-listed:
+		t.Fatal("List read the lock file while another holder had the file lock")
+	case <-time.After(100 * time.Millisecond):
+	}
+	release()
+	if n := <-listed; n != 1 {
+		t.Errorf("listed %d locks, want 1", n)
+	}
+}
+
 func TestFileLockStoreCreateConflict(t *testing.T) {
 	dir := t.TempDir()
 	s := NewFileLockStore(dir)

@@ -200,25 +200,34 @@ func (s *FileLockStore) lockEndpoint(endpoint string) (func(), error) {
 	mu := s.endpointMutex(endpoint)
 	mu.Lock()
 
+	release, err := s.acquireFileLock(endpoint, lockFile)
+	if err != nil {
+		mu.Unlock()
+		return nil, err
+	}
+	return func() {
+		release()
+		mu.Unlock()
+	}, nil
+}
+
+// acquireFileLock opens the endpoint's locks.json.lock file and locks it with lock, returning a function releasing it.
+func (s *FileLockStore) acquireFileLock(endpoint string, lock func(*os.File) error) (func(), error) {
 	path := s.lockFilePath(endpoint) + ".lock"
 	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
-		mu.Unlock()
 		return nil, fmt.Errorf("creating lock directory: %w", err)
 	}
 	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o600) //nolint:gosec // path is built from the sanitised endpoint
 	if err != nil {
-		mu.Unlock()
 		return nil, fmt.Errorf("opening lock file: %w", err)
 	}
-	if err := lockFile(f); err != nil {
+	if err := lock(f); err != nil {
 		_ = f.Close()
-		mu.Unlock()
 		return nil, fmt.Errorf("acquiring lock file: %w", err)
 	}
 	return func() {
 		_ = unlockFile(f)
 		_ = f.Close()
-		mu.Unlock()
 	}, nil
 }
 
@@ -239,6 +248,11 @@ func (s *FileLockStore) loadLocks(endpoint string) (*lockSet, error) {
 			return c.set, nil
 		}
 	}
+	release, err := s.acquireFileLock(endpoint, lockFileShared)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
 	return s.readLocks(endpoint)
 }
 
