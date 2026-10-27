@@ -7,8 +7,8 @@ import (
 	"strings"
 )
 
-// safeEndpointPattern matches names of letters, digits, dots, underscores and hyphens that do not start with a dot.
-var safeEndpointPattern = regexp.MustCompile(`^[a-zA-Z0-9_-][a-zA-Z0-9._-]*$`)
+// safeEndpointPattern matches names of letters, digits, dots, underscores and hyphens that do not start or end with a dot.
+var safeEndpointPattern = regexp.MustCompile(`^[a-zA-Z0-9_-]([a-zA-Z0-9._-]*[a-zA-Z0-9_-])?$`)
 
 // InvalidEndpoint is the fallback directory name for unsafe endpoint paths.
 const InvalidEndpoint = "_invalid"

@@ -633,7 +633,7 @@ func validateEndpointPath(endpointPath, label string, paths map[string]struct{},
 	dir := sanitise.Endpoint(endpointPath)
 	if dir == sanitise.InvalidEndpoint {
 		return fmt.Errorf("path %q may only contain letters, digits, \".\", \"_\" and \"-\" between slashes, "+
-			"and may not start with \"/.\"", endpointPath)
+			"and may not start with \"/.\" or end with \".\"", endpointPath)
 	}
 	if _, reserved := reservedDataDirEntries[strings.ToLower(dir)]; reserved {
 		return fmt.Errorf("path %q is reserved: the data directory already uses %q", endpointPath, strings.ToLower(dir))

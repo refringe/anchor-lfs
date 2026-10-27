@@ -1215,7 +1215,7 @@ authentication = "none"
 }
 
 func TestLoadUnsafeEndpointPath(t *testing.T) {
-	for _, endpoint := range []string{"/.hidden/repo", "/org/repo@v2", "/org/my repo"} {
+	for _, endpoint := range []string{"/.hidden/repo", "/org/repo@v2", "/org/my repo", "/org/repo."} {
 		t.Run(endpoint, func(t *testing.T) {
 			path := writeConfig(t, `
 [[endpoints]]
