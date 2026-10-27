@@ -309,12 +309,25 @@ func TestPartSizeFor(t *testing.T) {
 		{s3PartSize * s3MaxParts, s3PartSize},
 		{s3PartSize*s3MaxParts + 1, s3PartSize + 1},
 		{100 << 30, 10737419},
-		{math.MaxInt64, math.MaxInt64/s3MaxParts + 1},
+		{s3MaxPartSize * s3MaxParts, s3MaxPartSize},
+		{s3MaxPartSize*s3MaxParts + 1, s3MaxPartSize},
+		{math.MaxInt64, s3MaxPartSize},
 	}
 	for _, tt := range tests {
 		if got := partSizeFor(tt.size); got != tt.want {
 			t.Errorf("partSizeFor(%d) = %d, want %d", tt.size, got, tt.want)
 		}
+	}
+}
+
+func TestS3PutRejectsObjectsOverPartLimit(t *testing.T) {
+	store, client := testS3Store(t)
+	err := store.Put(t.Context(), "test", strings.Repeat("a", 64), strings.NewReader(""), s3MaxParts*s3MaxPartSize+1)
+	if !errors.Is(err, ErrObjectTooLarge) {
+		t.Fatalf("Put error = %v, want ErrObjectTooLarge", err)
+	}
+	if client.nextUploadID != 0 || len(client.objects) != 0 {
+		t.Error("Put sent a request to S3")
 	}
 }
 

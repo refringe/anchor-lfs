@@ -277,7 +277,7 @@ func (h *Handler) UploadHandler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if errors.Is(err, storage.ErrObjectTooLarge) {
-			writeError(w, r, http.StatusRequestEntityTooLarge, "object exceeds the maximum size storage accepts without a Content-Length")
+			writeError(w, r, http.StatusRequestEntityTooLarge, "object exceeds the maximum size storage accepts")
 			return
 		}
 		if body.err != nil || r.Context().Err() != nil {

@@ -36,6 +36,9 @@ const (
 // s3MaxPutSize is the largest object S3 accepts in a single PUT request.
 const s3MaxPutSize int64 = 5 << 30
 
+// s3MaxPartSize is the largest part S3 accepts in a multipart upload.
+const s3MaxPartSize int64 = 5 << 30
+
 // s3MaxIdleConns is the number of idle connections to the S3 endpoint kept open for reuse.
 const s3MaxIdleConns = 64
 
@@ -189,6 +192,10 @@ func (s *S3) Put(ctx context.Context, endpoint, oid string, reader io.Reader, si
 		return err
 	}
 
+	if limit := s3MaxParts * s3MaxPartSize; size > limit {
+		return fmt.Errorf("%w: %d bytes exceeds %d", ErrObjectTooLarge, size, limit)
+	}
+
 	hasher := sha256.New()
 	body := io.TeeReader(reader, hasher)
 	if size < 0 {
@@ -221,9 +228,9 @@ func (s *S3) putUnknownSize(ctx context.Context, key, oid string, body io.Reader
 	return s.putMultipart(ctx, key, oid, io.MultiReader(&first, body), hasher, -1, partSize)
 }
 
-// partSizeFor returns the part size that fits size bytes into s3MaxParts parts, and at least s3PartSize.
+// partSizeFor returns the part size that fits size bytes into s3MaxParts parts, within s3PartSize and s3MaxPartSize.
 func partSizeFor(size int64) int64 {
-	return max(s3PartSize, size/s3MaxParts+min(size%s3MaxParts, 1))
+	return min(s3MaxPartSize, max(s3PartSize, size/s3MaxParts+min(size%s3MaxParts, 1)))
 }
 
 // putObject writes data in a single PUT if the SHA-256 of everything hashed so far matches the OID.
