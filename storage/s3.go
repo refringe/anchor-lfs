@@ -204,7 +204,7 @@ func (s *S3) Put(ctx context.Context, endpoint, oid string, reader io.Reader, si
 	partSize := partSizeFor(size)
 
 	if size > partSize {
-		return s.putMultipart(ctx, key, oid, body, hasher, size, partSize)
+		return s.putMultipart(ctx, key, oid, body, hasher, size, make([]byte, partSize), 0)
 	}
 
 	buf := make([]byte, size)
@@ -216,16 +216,15 @@ func (s *S3) Put(ctx context.Context, endpoint, oid string, reader io.Reader, si
 
 // putUnknownSize uploads body until it ends, in one PUT if it fits in a part and as a multipart upload otherwise.
 func (s *S3) putUnknownSize(ctx context.Context, key, oid string, body io.Reader, hasher hash.Hash) error {
-	partSize := max(s.streamPartSize, s3PartSize)
-	var first bytes.Buffer
-	_, err := io.CopyN(&first, body, partSize)
+	buf := make([]byte, max(s.streamPartSize, s3PartSize))
+	n, err := fill(body, buf)
 	if errors.Is(err, io.EOF) {
-		return s.putObject(ctx, key, oid, first.Bytes(), hasher)
+		return s.putObject(ctx, key, oid, buf[:n], hasher)
 	}
 	if err != nil {
 		return fmt.Errorf("reading object %s: %w", oid, err)
 	}
-	return s.putMultipart(ctx, key, oid, io.MultiReader(&first, body), hasher, -1, partSize)
+	return s.putMultipart(ctx, key, oid, body, hasher, -1, buf, n)
 }
 
 // partSizeFor returns the part size that fits size bytes into s3MaxParts parts, within s3PartSize and s3MaxPartSize.
@@ -263,8 +262,8 @@ func fill(r io.Reader, buf []byte) (int, error) {
 	return n, nil
 }
 
-// putMultipart uploads size bytes of body, or all of it when size is negative, completing only if the SHA-256 matches.
-func (s *S3) putMultipart(ctx context.Context, key, oid string, body io.Reader, hasher hash.Hash, size, partSize int64) (err error) {
+// putMultipart uploads buf[:buffered], then size bytes of body (all if negative), completing if the SHA-256 matches.
+func (s *S3) putMultipart(ctx context.Context, key, oid string, body io.Reader, hasher hash.Hash, size int64, buf []byte, buffered int) (err error) {
 	created, err := s.client.CreateMultipartUpload(ctx, &s3.CreateMultipartUploadInput{
 		Bucket:            aws.String(s.bucket),
 		Key:               aws.String(key),
@@ -283,13 +282,14 @@ func (s *S3) putMultipart(ctx context.Context, key, oid string, body io.Reader, 
 		}
 	}()
 
-	buf := make([]byte, partSize)
+	partSize := int64(len(buf))
 	var parts []s3types.CompletedPart
 	for number := int32(1); size != 0; number++ {
-		var n int
-		if size > 0 {
+		n := buffered
+		buffered = 0
+		if n == 0 && size > 0 {
 			n, err = io.ReadFull(body, buf[:min(partSize, size)])
-		} else {
+		} else if n == 0 {
 			n, err = fill(body, buf)
 			if errors.Is(err, io.EOF) {
 				size, err = 0, nil

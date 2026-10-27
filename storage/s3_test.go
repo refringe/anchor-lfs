@@ -11,6 +11,7 @@ import (
 	"maps"
 	"math"
 	"net/url"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -136,6 +137,19 @@ func (m *mockS3Client) CompleteMultipartUpload(_ context.Context, input *s3.Comp
 func (m *mockS3Client) AbortMultipartUpload(_ context.Context, input *s3.AbortMultipartUploadInput, _ ...func(*s3.Options)) (*s3.AbortMultipartUploadOutput, error) {
 	delete(m.uploads, aws.ToString(input.UploadId))
 	return &s3.AbortMultipartUploadOutput{}, nil
+}
+
+// discardingS3Client is a mockS3Client that reads and discards part bodies instead of storing them.
+type discardingS3Client struct {
+	*mockS3Client
+}
+
+func (d discardingS3Client) UploadPart(_ context.Context, input *s3.UploadPartInput, _ ...func(*s3.Options)) (*s3.UploadPartOutput, error) {
+	if _, err := io.Copy(io.Discard, input.Body); err != nil {
+		return nil, err
+	}
+	d.partUploads++
+	return &s3.UploadPartOutput{ETag: aws.String(fmt.Sprintf("etag-%d", aws.ToInt32(input.PartNumber)))}, nil
 }
 
 // mockPresigner implements s3Presigner for testing.
@@ -328,6 +342,27 @@ func TestS3PutRejectsObjectsOverPartLimit(t *testing.T) {
 	}
 	if client.nextUploadID != 0 || len(client.objects) != 0 {
 		t.Error("Put sent a request to S3")
+	}
+}
+
+func TestS3PutUnknownSizeHoldsOnePart(t *testing.T) {
+	store, client := testS3Store(t)
+	store.client = discardingS3Client{client}
+	data := randomBytes(int(3 * s3PartSize))
+	oid := testutil.SHA256Hex(data)
+
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	err := store.Put(t.Context(), "test", oid, unseekable(bytes.NewReader(data)), -1)
+	runtime.ReadMemStats(&after)
+	if err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	if allocated, limit := after.TotalAlloc-before.TotalAlloc, uint64(s3PartSize*3/2); allocated > limit {
+		t.Errorf("Put allocated %d bytes, want at most %d for one part of %d", allocated, limit, s3PartSize)
+	}
+	if client.partUploads != 3 {
+		t.Errorf("uploaded %d parts, want 3", client.partUploads)
 	}
 }
 
