@@ -284,8 +284,7 @@ func probeOutcome(err error) (probe, error) {
 	return probeDenied, nil
 }
 
-// defaultRetryAfter is the wait reported when GitHub rate limits a request without saying when to retry, and
-// maxRetryAfter caps the wait GitHub asks for.
+// Retry waits for rate-limited requests: the default when GitHub gives no retry time, and the most GitHub can ask.
 const (
 	defaultRetryAfter = time.Minute
 	maxRetryAfter     = time.Hour
