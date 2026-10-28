@@ -319,9 +319,14 @@ func TestUppercaseOIDResolvesToSameObject(t *testing.T) {
 
 func TestLocalCheck(t *testing.T) {
 	if err := testStore(t).Check(t.Context()); err != nil {
-		t.Fatalf("Check on a writable directory: %v", err)
+		t.Fatalf("Check on an existing directory: %v", err)
 	}
+	if err := NewLocal(filepath.Join(t.TempDir(), "missing")).Check(t.Context()); err == nil {
+		t.Fatal("Check on a missing directory succeeded")
+	}
+}
 
+func TestLocalCheckLeavesWritabilityToDataDirectoryCheck(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("directory permission bits are not enforced on Windows")
 	}
@@ -333,7 +338,7 @@ func TestLocalCheck(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) }) //nolint:gosec // directories need the execute bit to be traversable
-	if err := NewLocal(dir).Check(t.Context()); err == nil || !strings.Contains(err.Error(), "is not writable") {
-		t.Fatalf("Check on a read-only directory = %v, want a not writable error", err)
+	if err := NewLocal(dir).Check(t.Context()); err != nil {
+		t.Fatalf("Check on a read-only directory: %v", err)
 	}
 }

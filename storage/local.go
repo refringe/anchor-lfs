@@ -77,11 +77,8 @@ func (l *Local) trackWriting(tmpPath string) (done func()) {
 	}
 }
 
-// Check confirms the storage directory accepts new files and its free space can be read.
+// Check confirms the storage directory's free space can be read.
 func (l *Local) Check(ctx context.Context) error {
-	if err := CheckWritableDir(l.basePath); err != nil {
-		return fmt.Errorf("storage directory %w", err)
-	}
 	if _, err := l.AvailableSpace(ctx); err != nil {
 		return fmt.Errorf("reading free space: %w", err)
 	}
