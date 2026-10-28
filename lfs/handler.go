@@ -146,7 +146,16 @@ func (h *Handler) BatchHandler(w http.ResponseWriter, r *http.Request) {
 		op = auth.OperationUpload
 	}
 
-	if !h.requireAuth(w, r, op) {
+	result, ok := h.requireCredentials(w, r, op)
+	if !ok {
+		return
+	}
+	if !result.Authorized && op == auth.OperationDownload {
+		writeError(w, r, http.StatusNotFound, "repository not found")
+		return
+	}
+	if !result.Authorized {
+		writeError(w, r, http.StatusForbidden, "insufficient permissions")
 		return
 	}
 
@@ -547,6 +556,16 @@ func (h *Handler) requireAuth(w http.ResponseWriter, r *http.Request, op auth.Op
 // requireAuthResult is like requireAuth but also returns the full auth.Result
 // so callers can access the authenticated username.
 func (h *Handler) requireAuthResult(w http.ResponseWriter, r *http.Request, op auth.Operation) (auth.Result, bool) {
+	result, ok := h.requireCredentials(w, r, op)
+	if ok && !result.Authorized {
+		writeError(w, r, http.StatusForbidden, "insufficient permissions")
+		return auth.Result{}, false
+	}
+	return result, ok
+}
+
+// requireCredentials authenticates the request for op, writing the error response unless the credentials are valid.
+func (h *Handler) requireCredentials(w http.ResponseWriter, r *http.Request, op auth.Operation) (auth.Result, bool) {
 	result, err := h.authenticate(r, op)
 	if rateErr, ok := errors.AsType[*auth.RateLimitedError](err); ok {
 		middleware.Logger(r.Context()).Warn().Err(err).Str("endpoint", h.endpoint.Name).Msg("authentication rate limited")
@@ -567,10 +586,6 @@ func (h *Handler) requireAuthResult(w http.ResponseWriter, r *http.Request, op a
 	if !result.Authenticated {
 		w.Header().Set("LFS-Authenticate", `Basic realm="Anchor LFS"`)
 		writeError(w, r, http.StatusUnauthorized, "credentials needed")
-		return auth.Result{}, false
-	}
-	if !result.Authorized {
-		writeError(w, r, http.StatusForbidden, "insufficient permissions")
 		return auth.Result{}, false
 	}
 	return result, true

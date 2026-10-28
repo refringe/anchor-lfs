@@ -1204,6 +1204,50 @@ func (s *spaceAwareStore) AvailableSpace(_ context.Context) (uint64, error) {
 	return s.avail, s.availErr
 }
 
+// deniedAuth is an authenticator that accepts every credential but authorises nothing.
+type deniedAuth struct{}
+
+func (a *deniedAuth) Authenticate(_ context.Context, _ *config.Endpoint, _, _ string, _ auth.Operation) (auth.Result, error) {
+	return auth.Result{Authenticated: true, Username: "carol"}, nil
+}
+
+func TestDeniedAccessStatus(t *testing.T) {
+	batch := func(operation string) string {
+		b, _ := json.Marshal(BatchRequest{Operation: operation, Objects: []Object{{OID: strings.Repeat("a", 64), Size: 1}}})
+		return string(b)
+	}
+	tests := []struct {
+		name       string
+		method     string
+		path       string
+		body       string
+		handler    func(*Handler) http.HandlerFunc
+		wantStatus int
+		wantMsg    string
+	}{
+		{"batch download", "POST", "/org/repo/objects/batch", batch("download"), func(h *Handler) http.HandlerFunc { return h.BatchHandler }, http.StatusNotFound, "repository not found"},
+		{"batch upload", "POST", "/org/repo/objects/batch", batch("upload"), func(h *Handler) http.HandlerFunc { return h.BatchHandler }, http.StatusForbidden, "insufficient permissions"},
+		{"list locks", "GET", "/org/repo/locks", "", func(h *Handler) http.HandlerFunc { return h.ListLocksHandler }, http.StatusForbidden, "insufficient permissions"},
+		{"create lock", "POST", "/org/repo/locks", `{"path":"a.bin"}`, func(h *Handler) http.HandlerFunc { return h.CreateLockHandler }, http.StatusForbidden, "insufficient permissions"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h, _, _ := testHandler(t)
+			h.auth = &deniedAuth{}
+
+			req := httptest.NewRequestWithContext(context.Background(), tt.method, tt.path, strings.NewReader(tt.body))
+			req.Header.Set("Accept", lfsMediaType)
+			req.Header.Set("Content-Type", lfsMediaType)
+			w := httptest.NewRecorder()
+			tt.handler(h)(w, req)
+
+			if w.Code != tt.wantStatus || !strings.Contains(w.Body.String(), tt.wantMsg) {
+				t.Fatalf("got %d %s, want %d %q", w.Code, w.Body.String(), tt.wantStatus, tt.wantMsg)
+			}
+		})
+	}
+}
+
 // failingAuth is an authenticator that always returns err.
 type failingAuth struct {
 	err error
