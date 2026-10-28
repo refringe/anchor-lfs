@@ -50,7 +50,7 @@ func unsupportedHashAlgo(objects []Object) *BatchResponse {
 	for i, obj := range objects {
 		resp.Objects[i] = ObjectResponse{
 			OID:   obj.OID,
-			Size:  obj.Size,
+			Size:  max(obj.Size, 0),
 			Error: &ObjectError{Code: 409, Message: "unsupported hash algorithm; only 'sha256' is supported"},
 		}
 	}
@@ -68,7 +68,7 @@ func (h *Handler) processObject(r *http.Request, operation string, obj Object, b
 	if msg := validateObject(obj); msg != "" {
 		return ObjectResponse{
 			OID:   obj.OID,
-			Size:  obj.Size,
+			Size:  max(obj.Size, 0),
 			Error: &ObjectError{Code: 422, Message: msg},
 		}
 	}

@@ -743,33 +743,50 @@ func TestBatchAcceptsZeroSizeObject(t *testing.T) {
 }
 
 func TestBatchRejectsNegativeSize(t *testing.T) {
-	h, _, _ := testHandler(t)
-
-	body := BatchRequest{
-		Operation: "download",
-		Objects:   []Object{{OID: "deadbeef00000000000000000000000000000000000000000000000000000000", Size: -1}},
-	}
-	b, _ := json.Marshal(body)
-
-	req := httptest.NewRequestWithContext(context.Background(), "POST", "/org/repo/objects/batch", bytes.NewReader(b))
-	req.Header.Set("Accept", lfsMediaType)
-	req.Header.Set("Content-Type", lfsMediaType)
-	w := httptest.NewRecorder()
-	h.BatchHandler(w, req)
-
-	if w.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d", w.Code)
+	tests := []struct {
+		name     string
+		hashAlgo string
+		wantCode int
+	}{
+		{"invalid size", "", 422},
+		{"unsupported hash algorithm", "sha1", 409},
 	}
 
-	var resp BatchResponse
-	if err := json.UnmarshalRead(w.Body, &resp); err != nil {
-		t.Fatalf("decoding response: %v", err)
-	}
-	if len(resp.Objects) != 1 {
-		t.Fatalf("expected 1 object, got %d", len(resp.Objects))
-	}
-	if resp.Objects[0].Error == nil || resp.Objects[0].Error.Code != 422 {
-		t.Fatalf("expected per-object 422 error, got %+v", resp.Objects[0].Error)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h, _, _ := testHandler(t)
+
+			body := BatchRequest{
+				Operation: "download",
+				HashAlgo:  tt.hashAlgo,
+				Objects:   []Object{{OID: "deadbeef00000000000000000000000000000000000000000000000000000000", Size: -1}},
+			}
+			b, _ := json.Marshal(body)
+
+			req := httptest.NewRequestWithContext(context.Background(), "POST", "/org/repo/objects/batch", bytes.NewReader(b))
+			req.Header.Set("Accept", lfsMediaType)
+			req.Header.Set("Content-Type", lfsMediaType)
+			w := httptest.NewRecorder()
+			h.BatchHandler(w, req)
+
+			if w.Code != http.StatusOK {
+				t.Fatalf("expected 200, got %d", w.Code)
+			}
+
+			var resp BatchResponse
+			if err := json.UnmarshalRead(w.Body, &resp); err != nil {
+				t.Fatalf("decoding response: %v", err)
+			}
+			if len(resp.Objects) != 1 {
+				t.Fatalf("expected 1 object, got %d", len(resp.Objects))
+			}
+			if resp.Objects[0].Error == nil || resp.Objects[0].Error.Code != tt.wantCode {
+				t.Fatalf("expected per-object %d error, got %+v", tt.wantCode, resp.Objects[0].Error)
+			}
+			if resp.Objects[0].Size != 0 {
+				t.Errorf("expected size 0, got %d", resp.Objects[0].Size)
+			}
+		})
 	}
 }
 
