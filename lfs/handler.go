@@ -198,13 +198,13 @@ func (h *Handler) hasSpaceFor(r *http.Request, objects []ObjectResponse) bool {
 // The HMAC-signed URL already proves the batch handler authenticated and authorized this request. The batch response
 // sets "authenticated": true, which tells the Git LFS client not to resend credentials on transfer requests.
 func (h *Handler) DownloadHandler(w http.ResponseWriter, r *http.Request) {
-	if !h.requireValidSignature(w, r, opDownload) {
+	oid := r.PathValue("oid")
+	if !storage.IsValidOID(oid) {
+		NotFoundHandler(w, r)
 		return
 	}
 
-	oid := r.PathValue("oid")
-	if !storage.IsValidOID(oid) {
-		writeError(w, r, http.StatusUnprocessableEntity, "invalid object id")
+	if !h.requireValidSignature(w, r, opDownload) {
 		return
 	}
 
@@ -241,13 +241,13 @@ func (h *Handler) DownloadHandler(w http.ResponseWriter, r *http.Request) {
 // The HMAC-signed URL already proves the batch handler authenticated and authorized this request. The batch response
 // sets "authenticated": true, which tells the Git LFS client not to resend credentials on transfer requests.
 func (h *Handler) UploadHandler(w http.ResponseWriter, r *http.Request) {
-	if !h.requireValidSignature(w, r, opUpload) {
+	oid := r.PathValue("oid")
+	if !storage.IsValidOID(oid) {
+		NotFoundHandler(w, r)
 		return
 	}
 
-	oid := r.PathValue("oid")
-	if !storage.IsValidOID(oid) {
-		writeError(w, r, http.StatusUnprocessableEntity, "invalid object id")
+	if !h.requireValidSignature(w, r, opUpload) {
 		return
 	}
 

@@ -1702,33 +1702,31 @@ func TestUploadIdempotent(t *testing.T) {
 }
 
 func TestDownloadInvalidOID(t *testing.T) {
-	h, _, signer := testHandler(t)
+	h, _, _ := testHandler(t)
 
 	badOID := "not-valid"
-	uri := signedURI(signer, opDownload, "/org/repo/objects/"+badOID)
-	req := httptest.NewRequestWithContext(context.Background(), "GET", uri, nil)
+	req := httptest.NewRequestWithContext(context.Background(), "GET", "/org/repo/objects/"+badOID, nil)
 	req.SetPathValue("oid", badOID)
 	w := httptest.NewRecorder()
 	h.DownloadHandler(w, req)
 
-	if w.Code != http.StatusUnprocessableEntity {
-		t.Fatalf("expected 422, got %d", w.Code)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d", w.Code)
 	}
 }
 
 func TestUploadInvalidOID(t *testing.T) {
-	h, _, signer := testHandler(t)
+	h, _, _ := testHandler(t)
 
 	badOID := "zzzz"
-	uri := signedURI(signer, opUpload, "/org/repo/objects/"+badOID)
-	req := httptest.NewRequestWithContext(context.Background(), "PUT", uri, strings.NewReader("data"))
+	req := httptest.NewRequestWithContext(context.Background(), "PUT", "/org/repo/objects/"+badOID, strings.NewReader("data"))
 	req.ContentLength = 4
 	req.SetPathValue("oid", badOID)
 	w := httptest.NewRecorder()
 	h.UploadHandler(w, req)
 
-	if w.Code != http.StatusUnprocessableEntity {
-		t.Fatalf("expected 422, got %d", w.Code)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d", w.Code)
 	}
 }
 

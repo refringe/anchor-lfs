@@ -367,6 +367,10 @@ func TestIntegrationServiceRoutesAndUnknownPaths(t *testing.T) {
 		{http.MethodPost, "/org/wrong-repo/objects/batch", http.StatusNotFound, "application/vnd.git-lfs+json", "message"},
 		{http.MethodPost, "/org/wrong-repo/locks/verify", http.StatusNotFound, "application/vnd.git-lfs+json", "message"},
 		{http.MethodPost, "/org/repo.git/info/lfs/objects/batch", http.StatusNotFound, "application/vnd.git-lfs+json", "message"},
+		{http.MethodGet, "/org/repo/objects/batch", http.StatusNotFound, "application/vnd.git-lfs+json", "message"},
+		{http.MethodPut, "/org/repo/objects/batch", http.StatusNotFound, "application/vnd.git-lfs+json", "message"},
+		{http.MethodGet, "/org/repo/objects/verify", http.StatusNotFound, "application/vnd.git-lfs+json", "message"},
+		{http.MethodPut, "/org/repo/objects/verify", http.StatusNotFound, "application/vnd.git-lfs+json", "message"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.method+" "+tt.path, func(t *testing.T) {
