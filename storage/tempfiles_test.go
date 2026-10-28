@@ -16,17 +16,7 @@ func TestRemoveStaleTempFiles(t *testing.T) {
 	oid := strings.Repeat("ab", 32)
 	writeFile := func(name string, modified time.Time) string {
 		t.Helper()
-		path := filepath.Join(dir, name)
-		if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(path, []byte("data"), 0o600); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.Chtimes(path, modified, modified); err != nil {
-			t.Fatal(err)
-		}
-		return path
+		return writeFileModified(t, dir, name, modified)
 	}
 
 	staleObject := writeFile("org_repo/ab/ab/.tmp-123", twoHoursAgo)
@@ -38,7 +28,7 @@ func TestRemoveStaleTempFiles(t *testing.T) {
 		writeFile("signing.key", twoHoursAgo),
 	}
 
-	removed, err := RemoveStaleTempFiles(dir, time.Hour, nil)
+	removed, err := RemoveStaleTempFiles(dir, time.Hour, nil, false)
 	if err != nil {
 		t.Fatalf("RemoveStaleTempFiles: %v", err)
 	}
@@ -54,6 +44,27 @@ func TestRemoveStaleTempFiles(t *testing.T) {
 		if _, err := os.Stat(path); err != nil {
 			t.Errorf("%s was removed: %v", path, err)
 		}
+	}
+}
+
+func TestRemoveStaleTempFilesSkipsShards(t *testing.T) {
+	dir := t.TempDir()
+	twoHoursAgo := time.Now().Add(-2 * time.Hour)
+	inShard := writeFileModified(t, dir, "org_repo/ab/cd/.tmp-1", twoHoursAgo)
+	writeFileModified(t, dir, "org_repo/.tmp/.tmp-2", twoHoursAgo)
+	writeFileModified(t, dir, "ab/.tmp/.tmp-3", twoHoursAgo)
+	writeFileModified(t, dir, "locks/ab/.tmp-locks-4", twoHoursAgo)
+
+	removed, err := RemoveStaleTempFiles(dir, time.Hour, nil, true)
+	if err != nil || removed != 3 {
+		t.Fatalf("RemoveStaleTempFiles skipping shards = %d, %v; want 3, nil", removed, err)
+	}
+	if _, err := os.Stat(inShard); err != nil {
+		t.Fatalf("temporary file in a shard was removed: %v", err)
+	}
+	removed, err = RemoveStaleTempFiles(dir, time.Hour, nil, false)
+	if err != nil || removed != 1 {
+		t.Fatalf("RemoveStaleTempFiles = %d, %v; want 1, nil", removed, err)
 	}
 }
 
@@ -78,7 +89,7 @@ func TestRemoveStaleTempFilesSkipsUnreadableDirectories(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	removed, err := RemoveStaleTempFiles(dir, time.Hour, nil)
+	removed, err := RemoveStaleTempFiles(dir, time.Hour, nil, false)
 	if err != nil {
 		t.Fatalf("RemoveStaleTempFiles: %v", err)
 	}
@@ -108,7 +119,7 @@ func TestRemoveStaleTempFilesKeepsFilesInUse(t *testing.T) {
 	}
 	inUse := func(path string) bool { return path == "org_repo/"+TempFilePrefix+"busy" }
 
-	removed, err := RemoveStaleTempFiles(dir, time.Hour, inUse)
+	removed, err := RemoveStaleTempFiles(dir, time.Hour, inUse, false)
 	if err != nil {
 		t.Fatalf("RemoveStaleTempFiles: %v", err)
 	}
@@ -140,7 +151,7 @@ func TestRemoveStaleTempFilesIgnoresSymlinks(t *testing.T) {
 		t.Skipf("creating symlink: %v", err)
 	}
 
-	removed, err := RemoveStaleTempFiles(dir, time.Hour, nil)
+	removed, err := RemoveStaleTempFiles(dir, time.Hour, nil, false)
 	if err != nil {
 		t.Fatalf("RemoveStaleTempFiles: %v", err)
 	}
@@ -153,7 +164,23 @@ func TestRemoveStaleTempFilesIgnoresSymlinks(t *testing.T) {
 }
 
 func TestRemoveStaleTempFilesMissingDirectory(t *testing.T) {
-	if _, err := RemoveStaleTempFiles(filepath.Join(t.TempDir(), "missing"), time.Hour, nil); err == nil {
+	if _, err := RemoveStaleTempFiles(filepath.Join(t.TempDir(), "missing"), time.Hour, nil, false); err == nil {
 		t.Error("RemoveStaleTempFiles on a missing directory succeeded")
 	}
+}
+
+// writeFileModified writes a small file at name under dir, creating its directories, and sets its modification time.
+func writeFileModified(t *testing.T, dir, name string, modified time.Time) string {
+	t.Helper()
+	path := filepath.Join(dir, name)
+	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("data"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(path, modified, modified); err != nil {
+		t.Fatal(err)
+	}
+	return path
 }

@@ -12,8 +12,11 @@ import (
 // TempFilePrefix starts the name of every temporary file written under the data directory.
 const TempFilePrefix = ".tmp-"
 
+// uploadTempDir is the directory in each endpoint's storage directory that holds the temporary files of uploads.
+const uploadTempDir = ".tmp"
+
 // RemoveStaleTempFiles deletes and counts temporary files under dir unmodified for over olderThan and not inUse.
-func RemoveStaleTempFiles(dir string, olderThan time.Duration, inUse func(path string) bool) (int, error) {
+func RemoveStaleTempFiles(dir string, olderThan time.Duration, inUse func(path string) bool, skipShards bool) (int, error) {
 	root, err := os.OpenRoot(dir)
 	if err != nil {
 		return 0, fmt.Errorf("removing stale temporary files: %w", err)
@@ -31,6 +34,9 @@ func RemoveStaleTempFiles(dir string, olderThan time.Duration, inUse func(path s
 			if !errors.Is(err, fs.ErrPermission) {
 				problems = append(problems, err)
 			}
+			return fs.SkipDir
+		}
+		if skipShards && entry.IsDir() && isShardDir(path) {
 			return fs.SkipDir
 		}
 		if !entry.Type().IsRegular() || !strings.HasPrefix(entry.Name(), TempFilePrefix) {
@@ -63,4 +69,10 @@ func RemoveStaleTempFiles(dir string, olderThan time.Duration, inUse func(path s
 		return removed, fmt.Errorf("removing stale temporary files: %w", err)
 	}
 	return removed, nil
+}
+
+// isShardDir reports whether path, slash-separated and relative to the data directory, is a top-level object shard.
+func isShardDir(path string) bool {
+	endpoint, shard, ok := strings.Cut(path, "/")
+	return ok && endpoint != "locks" && len(shard) == 2 && !strings.Contains(shard, "/")
 }

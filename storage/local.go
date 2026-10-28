@@ -145,7 +145,11 @@ func (l *Local) Put(ctx context.Context, endpoint, oid string, reader io.Reader,
 		return fmt.Errorf("creating directory: %w", err)
 	}
 
-	tmp, err := os.CreateTemp(filepath.Dir(destPath), TempFilePrefix+"*")
+	tmpDir := filepath.Join(l.basePath, sanitise.Endpoint(endpoint), uploadTempDir)
+	if err := os.MkdirAll(tmpDir, 0o750); err != nil {
+		return fmt.Errorf("creating directory: %w", err)
+	}
+	tmp, err := os.CreateTemp(tmpDir, TempFilePrefix+"*")
 	if err != nil {
 		return fmt.Errorf("creating temp file: %w", err)
 	}

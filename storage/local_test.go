@@ -228,7 +228,7 @@ func TestPutTempFileSurvivesSweepWhileWriting(t *testing.T) {
 		t.Fatalf("Put returned before reading the whole body: %v", err)
 	}
 
-	matches, err := filepath.Glob(filepath.Join(store.basePath, "org_repo", oid[:2], oid[2:4], TempFilePrefix+"*"))
+	matches, err := filepath.Glob(filepath.Join(store.basePath, "org_repo", uploadTempDir, TempFilePrefix+"*"))
 	if err != nil || len(matches) != 1 {
 		close(body.resume)
 		t.Fatalf("temporary files = %v (error %v), want one", matches, err)
@@ -245,7 +245,7 @@ func TestPutTempFileSurvivesSweepWhileWriting(t *testing.T) {
 	if !store.Writing(path) {
 		t.Errorf("Writing(%q) = false during Put", path)
 	}
-	removed, err := RemoveStaleTempFiles(store.basePath, time.Hour, store.Writing)
+	removed, err := RemoveStaleTempFiles(store.basePath, time.Hour, store.Writing, true)
 	if err != nil || removed != 0 {
 		t.Errorf("RemoveStaleTempFiles = %d, %v; want 0, nil", removed, err)
 	}

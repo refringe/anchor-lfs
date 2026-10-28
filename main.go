@@ -404,12 +404,12 @@ const (
 	tempSweepInterval = time.Hour
 )
 
-// sweepTempFiles removes stale temporary files not inUse from dataDir now and every tempSweepInterval until ctx ends.
+// sweepTempFiles removes stale temporary files not inUse from dataDir now, then outside object shards every interval.
 func sweepTempFiles(ctx context.Context, dataDir string, inUse func(path string) bool) {
 	ticker := time.NewTicker(tempSweepInterval)
 	defer ticker.Stop()
-	for {
-		removed, err := storage.RemoveStaleTempFiles(dataDir, tempFileMaxAge, inUse)
+	for skipShards := false; ; skipShards = true {
+		removed, err := storage.RemoveStaleTempFiles(dataDir, tempFileMaxAge, inUse, skipShards)
 		if err != nil {
 			log.Warn().Err(err).Int("removed", removed).Msg("sweeping temporary files")
 		} else if removed > 0 {
