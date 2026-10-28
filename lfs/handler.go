@@ -36,6 +36,9 @@ const maxObjectsPerBatch = 1000
 
 const lfsMediaType = "application/vnd.git-lfs+json"
 
+// hashAlgo is the only hash algorithm that object IDs are accepted in.
+const hashAlgo = "sha256"
+
 // msgInternalError is the generic message returned to clients for unexpected server-side failures.
 const msgInternalError = "internal error"
 
@@ -136,11 +139,6 @@ func (h *Handler) BatchHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if req.HashAlgo != "" && req.HashAlgo != "sha256" {
-		writeError(w, r, http.StatusConflict, "unsupported hash algorithm; only 'sha256' is supported")
-		return
-	}
-
 	op := auth.OperationDownload
 	if req.Operation == opUpload {
 		op = auth.OperationUpload
@@ -156,6 +154,11 @@ func (h *Handler) BatchHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	if !result.Authorized {
 		writeError(w, r, http.StatusForbidden, "insufficient permissions")
+		return
+	}
+
+	if req.HashAlgo != "" && req.HashAlgo != hashAlgo {
+		writeJSON(w, http.StatusOK, unsupportedHashAlgo(req.Objects))
 		return
 	}
 

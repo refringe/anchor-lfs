@@ -40,8 +40,21 @@ func (h *Handler) processBatch(r *http.Request, req *BatchRequest, baseURL strin
 	return &BatchResponse{
 		Transfer: "basic",
 		Objects:  objects[:started],
-		HashAlgo: "sha256",
+		HashAlgo: hashAlgo,
 	}
+}
+
+// unsupportedHashAlgo answers a batch request naming a hash algorithm other than SHA-256 with a 409 for every object.
+func unsupportedHashAlgo(objects []Object) *BatchResponse {
+	resp := &BatchResponse{Transfer: "basic", Objects: make([]ObjectResponse, len(objects)), HashAlgo: hashAlgo}
+	for i, obj := range objects {
+		resp.Objects[i] = ObjectResponse{
+			OID:   obj.OID,
+			Size:  obj.Size,
+			Error: &ObjectError{Code: 409, Message: "unsupported hash algorithm; only 'sha256' is supported"},
+		}
+	}
+	return resp
 }
 
 // verifyAction returns the signed verify action that every object of one upload batch shares.

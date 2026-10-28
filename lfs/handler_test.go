@@ -774,23 +774,42 @@ func TestBatchRejectsNegativeSize(t *testing.T) {
 }
 
 func TestBatchRejectsUnsupportedHashAlgo(t *testing.T) {
-	h, _, _ := testHandler(t)
-
 	body := BatchRequest{
-		Operation: "download",
+		Operation: "upload",
 		HashAlgo:  "sha1",
-		Objects:   []Object{{OID: "deadbeef00000000000000000000000000000000000000000000000000000000", Size: 100}},
+		Objects:   []Object{{OID: fmt.Sprintf("%064x", 1), Size: 100}, {OID: fmt.Sprintf("%064x", 2), Size: 200}},
 	}
 	b, _ := json.Marshal(body)
+	send := func(h *Handler) *httptest.ResponseRecorder {
+		req := httptest.NewRequestWithContext(context.Background(), "POST", "/org/repo/objects/batch", bytes.NewReader(b))
+		req.Header.Set("Accept", lfsMediaType)
+		req.Header.Set("Content-Type", lfsMediaType)
+		w := httptest.NewRecorder()
+		h.BatchHandler(w, req)
+		return w
+	}
 
-	req := httptest.NewRequestWithContext(context.Background(), "POST", "/org/repo/objects/batch", bytes.NewReader(b))
-	req.Header.Set("Accept", lfsMediaType)
-	req.Header.Set("Content-Type", lfsMediaType)
-	w := httptest.NewRecorder()
-	h.BatchHandler(w, req)
+	h, _, _ := testHandler(t)
+	w := send(h)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var resp BatchResponse
+	if err := json.UnmarshalRead(w.Body, &resp); err != nil {
+		t.Fatal(err)
+	}
+	if len(resp.Objects) != 2 || resp.HashAlgo != "sha256" {
+		t.Fatalf("got %d objects with hash_algo %q, want 2 with sha256", len(resp.Objects), resp.HashAlgo)
+	}
+	for _, obj := range resp.Objects {
+		if obj.Error == nil || obj.Error.Code != http.StatusConflict || obj.Actions != nil {
+			t.Errorf("object %s: error %+v, actions %v; want a 409 error and no actions", obj.OID, obj.Error, obj.Actions)
+		}
+	}
 
-	if w.Code != http.StatusConflict {
-		t.Fatalf("expected 409, got %d", w.Code)
+	h.auth = noCredentialsAuth{}
+	if w := send(h); w.Code != http.StatusUnauthorized {
+		t.Errorf("without credentials: expected 401, got %d", w.Code)
 	}
 }
 
