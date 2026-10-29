@@ -1,6 +1,6 @@
 # Build stage: runs natively on the build host regardless of target platform. TARGETOS and TARGETARCH are set
 # automatically by buildx, enabling native Go cross-compilation instead of slow QEMU emulation.
-FROM --platform=$BUILDPLATFORM golang:1.26-alpine AS builder
+FROM --platform=$BUILDPLATFORM golang:1.27-alpine@sha256:b8c9b82affbbb82a020bbcf998dad2ba9516944ac7e883524642a481a9505e9c AS builder
 
 ARG TARGETOS
 ARG TARGETARCH
@@ -17,13 +17,15 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath \
     -o anchor-lfs .
 
 # Runtime stage
-FROM alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b
+FROM alpine:3.24@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6
 
-RUN addgroup -S anchor && adduser -S anchor -G anchor
+RUN addgroup -S -g 101 anchor && adduser -S -u 100 -G anchor anchor \
+    && mkdir -p /app/data && chown anchor:anchor /app/data
 WORKDIR /app
 COPY --from=builder /build/anchor-lfs .
 
 USER anchor
 EXPOSE 5420
+HEALTHCHECK --interval=30s --timeout=15s --start-period=30s --retries=3 CMD ["./anchor-lfs", "healthcheck"]
 
 ENTRYPOINT ["./anchor-lfs"]

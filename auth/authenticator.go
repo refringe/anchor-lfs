@@ -4,9 +4,25 @@ package auth
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"time"
 
 	"github.com/refringe/anchor-lfs/config"
 )
+
+// ErrUnavailable is wrapped by errors returned when the identity provider fails or cannot be reached.
+var ErrUnavailable = errors.New("authentication service unavailable")
+
+// RateLimitedError is returned when the identity provider is rate limiting the caller's credentials.
+type RateLimitedError struct {
+	RetryAfter time.Duration
+}
+
+// Error describes the rate limit and how long until it lifts.
+func (e *RateLimitedError) Error() string {
+	return fmt.Sprintf("authentication service rate limit exceeded; retry after %s", e.RetryAfter)
+}
 
 // Operation represents an LFS operation type (download or upload).
 type Operation string
@@ -25,13 +41,11 @@ type Result struct {
 	Authorized bool
 	// Username identifies the authenticated user (used for lock ownership).
 	Username string
+	// Maintainer indicates the caller may manage the repository, such as by forcing an unlock of someone else's lock.
+	Maintainer bool
 }
 
-// Authenticator validates credentials and checks authorisation for an endpoint.
-//
-// Implementations must return Result{Authenticated: false} (not an error) when the provided credentials are invalid.
-// Errors should only be returned for transient failures such as network errors or upstream service outages. The
-// username parameter may be ignored by implementations where the token is self-authenticating (e.g., GitHub PATs).
+// Authenticator checks credentials for an endpoint, returning an error only when the identity provider cannot answer.
 type Authenticator interface {
 	Authenticate(ctx context.Context, endpoint *config.Endpoint, username, password string, op Operation) (Result, error)
 }

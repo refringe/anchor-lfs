@@ -4,9 +4,10 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
-	"encoding/json"
+	"encoding/json/v2"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -17,10 +18,13 @@ import (
 
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
+	"github.com/sethvargo/go-limiter"
 	"github.com/sethvargo/go-limiter/memorystore"
 
 	"github.com/refringe/anchor-lfs/auth"
 	"github.com/refringe/anchor-lfs/config"
+	"github.com/refringe/anchor-lfs/internal/metrics"
+	"github.com/refringe/anchor-lfs/internal/sanitise"
 	"github.com/refringe/anchor-lfs/lfs"
 	"github.com/refringe/anchor-lfs/middleware"
 	"github.com/refringe/anchor-lfs/storage"
@@ -33,27 +37,50 @@ var (
 )
 
 func main() {
+	os.Exit(runCommand(os.Args[1:], os.Stdout, os.Stderr))
+}
+
+// serve runs the server with the configuration at configPath until SIGINT or SIGTERM and returns the exit code.
+func serve(configPath string) int {
 	// Default: JSON to stderr.
 	log.Logger = zerolog.New(os.Stderr).With().Timestamp().Logger()
 
-	cfg, err := config.Load(config.DefaultConfigPath)
+	cfg, err := config.Load(configPath)
+	if invalid, ok := errors.AsType[*config.ValidationError](err); ok {
+		log.Fatal().Errs("errors", invalid.Problems).Msg("failed to load configuration")
+	}
 	if err != nil {
 		log.Fatal().Err(err).Msg("failed to load configuration")
 	}
 
-	if cfg.Options.AdditionalLogging {
-		log.Logger = zerolog.New(zerolog.ConsoleWriter{Out: os.Stderr}).
-			With().Timestamp().Logger()
-		zerolog.SetGlobalLevel(zerolog.DebugLevel)
-	}
+	configureLogging(&cfg.Options)
 
 	log.Info().
 		Str("version", version).
 		Str("commit", commit).
 		Str("built", date).
+		Str("config", absolutePath(configPath)).
 		Msg("starting anchor-lfs")
+	log.Info().
+		Str("listen_address", cfg.Options.ListenAddress).
+		Str("metrics_address", cfg.Options.MetricsAddress).
+		Int64("max_upload_size", cfg.Options.MaxUploadSize).
+		Uint64("rate_limit_tokens", cfg.Options.RateLimitTokens).
+		Str("rate_limit_window", cfg.Options.RateLimitWindow).
+		Str("url_expiry", cfg.Options.URLExpiry).
+		Str("auth_cache_ttl", cfg.Options.AuthCacheTTL).
+		Str("upload_idle_timeout", cfg.Options.UploadIdleTimeout).
+		Str("shutdown_timeout", cfg.Options.ShutdownTimeout).
+		Msg("settings")
+
+	if err := ensureWritableDir(cfg.Options.DataDirectory); err != nil {
+		log.Fatal().Err(err).Int("uid", os.Getuid()).Int("gid", os.Getgid()).Msg("checking data directory")
+	}
+
+	serverMetrics := metrics.New(version, commit)
 
 	var store storage.Adapter
+	var tempFileInUse func(path string) bool
 	switch cfg.Storage.Backend {
 	case config.StorageS3:
 		s3Store, err := storage.NewS3(context.Background(), storage.S3Config{
@@ -65,6 +92,7 @@ func main() {
 			Prefix:          cfg.Storage.S3Prefix,
 			PresignedURLs:   cfg.Storage.S3PresignedURLsEnabled(),
 			ForcePathStyle:  cfg.Storage.S3ForcePathStyleEnabled(),
+			MaxUploadSize:   cfg.Options.MaxUploadSize,
 		})
 		if err != nil {
 			log.Fatal().Err(err).Msg("creating S3 storage adapter")
@@ -76,26 +104,45 @@ func main() {
 			Bool("presigned_urls", cfg.Storage.S3PresignedURLsEnabled()).
 			Msg("using S3 storage backend")
 	default:
-		store = storage.NewLocal(cfg.Options.DataDirectory)
+		local := storage.NewLocal(cfg.Options.DataDirectory)
+		serverMetrics.RegisterAvailableSpace(local.AvailableSpace)
+		store = local
+		tempFileInUse = local.Writing
 		log.Info().Str("path", cfg.Options.DataDirectory).Msg("using local storage backend")
+	}
+	checkCtx, cancelCheck := context.WithTimeout(context.Background(), storageCheckTimeout)
+	err = store.Check(checkCtx)
+	cancelCheck()
+	if err != nil {
+		log.Fatal().Err(err).Msg("checking storage")
 	}
 	lockStore := lfs.NewFileLockStore(cfg.Options.DataDirectory)
 
 	rateLimitStore, err := memorystore.New(&memorystore.Config{
-		Tokens:   cfg.Options.RateLimitTokens,
-		Interval: cfg.Options.RateLimitInterval,
+		Tokens:        cfg.Options.RateLimitTokens,
+		Interval:      cfg.Options.RateLimitInterval,
+		SweepInterval: cfg.Options.RateLimitInterval,
+		SweepMinTTL:   cfg.Options.RateLimitInterval,
 	})
 	if err != nil {
 		log.Fatal().Err(err).Msg("creating rate limiter")
 	}
 
-	// Shared HTTP client for GitHub API calls (connection pooling).
-	githubHTTPClient := &http.Client{Timeout: 10 * time.Second}
+	proxyTrust, err := middleware.NewProxyTrust(cfg.Options.TrustedProxies)
+	if err != nil {
+		log.Fatal().Err(err).Msg("creating proxy trust")
+	}
+	log.Info().Strs("trusted_proxies", cfg.Options.TrustedProxies).Msg("trusting X-Forwarded-* headers from these peers")
+
+	// Shared HTTP client for GitHub API calls, keeping up to 32 idle connections per host.
+	githubTransport := http.DefaultTransport.(*http.Transport).Clone()
+	githubTransport.MaxIdleConnsPerHost = 32
+	githubHTTPClient := &http.Client{Timeout: 10 * time.Second, Transport: githubTransport}
 
 	mux := http.NewServeMux()
 
 	if cfg.Options.BaseURL == "" {
-		log.Warn().Msg("base_url is not set; action URLs will be derived from request headers — ensure a trusted reverse proxy sets X-Forwarded-Proto and X-Forwarded-Host, or set base_url in config")
+		log.Warn().Msg("base_url is not set; action URLs will be derived from the Host header, or X-Forwarded-Host and X-Forwarded-Proto from trusted_proxies peers; set base_url in config")
 	}
 
 	signingKey := cfg.Options.SigningKeyBytes
@@ -146,62 +193,37 @@ func main() {
 			MaxUploadSize: cfg.Options.MaxUploadSize,
 			Signer:        signer,
 			LockStore:     lockStore,
+
+			UploadIdleTimeout: cfg.Options.UploadIdleTimeoutDuration,
 		})
 
 		prefix := ep.Path
-
-		// Batch API — rate limited.
-		mux.Handle(fmt.Sprintf("POST %s/objects/batch", prefix), middleware.RateLimit(rateLimitStore, http.HandlerFunc(handler.BatchHandler)))
-
-		// Download — rate limited.
-		mux.Handle(fmt.Sprintf("GET %s/objects/{oid}", prefix), middleware.RateLimit(rateLimitStore, http.HandlerFunc(handler.DownloadHandler)))
-
-		// Upload — not rate limited; uploads are authenticated and size-bounded,
-		// and rate limiting could interfere with legitimate large transfers.
-		mux.Handle(fmt.Sprintf("PUT %s/objects/{oid}", prefix), http.HandlerFunc(handler.UploadHandler))
-
-		// Verify — rate limited.
-		mux.Handle(fmt.Sprintf("POST %s/objects/verify", prefix), middleware.RateLimit(rateLimitStore, http.HandlerFunc(handler.VerifyHandler)))
-
-		// File Locking API — rate limited.
-		mux.Handle(fmt.Sprintf("POST %s/locks", prefix), middleware.RateLimit(rateLimitStore, http.HandlerFunc(handler.CreateLockHandler)))
-		mux.Handle(fmt.Sprintf("GET %s/locks", prefix), middleware.RateLimit(rateLimitStore, http.HandlerFunc(handler.ListLocksHandler)))
-		mux.Handle(fmt.Sprintf("POST %s/locks/verify", prefix), middleware.RateLimit(rateLimitStore, http.HandlerFunc(handler.VerifyLocksHandler)))
-		mux.Handle(fmt.Sprintf("POST %s/locks/{id}/unlock", prefix), middleware.RateLimit(rateLimitStore, http.HandlerFunc(handler.UnlockHandler)))
+		registerRoutes(mux, prefix, handler, rateLimitStore)
+		if ep.AuthMethod() == "none" {
+			log.Warn().Str("name", ep.Name).Str("path", prefix).Msg("endpoint has no authentication; anyone can read, write and release any lock")
+		}
+		if ep.UnexpectedGitHubAPIHost() {
+			log.Warn().Str("name", ep.Name).Str("path", prefix).Str("github_api_url", ep.GitHubBaseURL.String()).
+				Msg("github_api_url is not api.github.com for a github.com repository; every client token for this endpoint is sent to it")
+		}
 
 		log.Info().
 			Str("name", ep.Name).
 			Str("path", prefix).
+			Str("directory", sanitise.Endpoint(prefix)).
 			Str("auth", ep.Authentication).
 			Str("visibility", ep.Visibility).
 			Msg("registered endpoint")
 	}
 
-	mux.HandleFunc("GET /health", func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]string{
-			"status":  "ok",
-			"version": version,
-		})
-	})
-
-	mux.HandleFunc("GET /", func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/" {
-			http.NotFound(w, r)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]string{"version": version})
-	})
-
-	var handler http.Handler = mux
-	if cfg.Options.AdditionalLogging {
-		handler = middleware.Logging(handler)
+	if len(githubAuths) > 0 {
+		serverMetrics.RegisterAuthCache(sumCacheStats(githubAuths))
 	}
 
+	registerServiceRoutes(mux, newReadiness(store, cfg.Options.DataDirectory))
+
 	server := &http.Server{
-		Addr:    cfg.Options.ListenAddress,
-		Handler: handler,
+		Handler: serverHandler(mux, proxyTrust, cfg.Options.AccessLogEnabled(), serverMetrics),
 
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       120 * time.Second,
@@ -212,26 +234,38 @@ func main() {
 		// protects against slowloris-style attacks on the header phase.
 	}
 
-	// Graceful shutdown.
-	done := make(chan os.Signal, 1)
-	signal.Notify(done, os.Interrupt, syscall.SIGTERM)
+	signalled, stopSignals := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 
-	go func() {
-		log.Info().Str("address", cfg.Options.ListenAddress).Msg("listening")
-		if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			log.Fatal().Err(err).Msg("server error")
-		}
-	}()
+	var listenConfig net.ListenConfig
+	listener, err := listenConfig.Listen(context.Background(), "tcp", cfg.Options.ListenAddress)
+	if err != nil {
+		log.Fatal().Err(err).Str("address", cfg.Options.ListenAddress).Msg("listening")
+	}
+	log.Info().Str("address", listener.Addr().String()).Msg("listening")
 
-	<-done
-	log.Info().Msg("shutting down")
+	served := make(chan error, 2)
+	go func() { served <- server.Serve(listener) }()
+	metricsServer := serveMetrics(cfg.Options.MetricsAddress, serverMetrics, served)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	sweepCtx, stopSweep := context.WithCancel(context.Background())
+	go sweepTempFiles(sweepCtx, cfg.Options.DataDirectory, tempFileInUse)
+
+	exitCode := awaitStop(signalled, stopSignals, served, cfg.Options.ShutdownTimeout)
+	stopSweep()
+
+	ctx, cancel := context.WithTimeout(context.Background(), cfg.Options.ShutdownTimeoutDuration)
 	defer cancel()
 
 	if err := server.Shutdown(ctx); err != nil {
-		log.Error().Err(err).Msg("shutdown error")
+		log.Error().Err(err).Msg("closing connections still open after shutdown_timeout")
+		_ = server.Close()
+		exitCode = 1
 	}
+	if metricsServer != nil && metricsServer.Shutdown(ctx) != nil {
+		_ = metricsServer.Close()
+	}
+
+	_ = rateLimitStore.Close(ctx)
 
 	// Close authenticator background goroutines (e.g., cache sweeper).
 	for _, g := range githubAuths {
@@ -240,6 +274,153 @@ func main() {
 
 	// Zero signing key material in memory.
 	_ = signer.Close()
+	return exitCode
+}
+
+// serverHandler wraps mux with proxy trust, request IDs, metrics and, when accessLog is set, the access log.
+func serverHandler(mux http.Handler, proxyTrust *middleware.ProxyTrust, accessLog bool, m *metrics.Metrics) http.Handler {
+	handler := m.Instrument(mux)
+	if accessLog {
+		handler = middleware.Logging(handler, "/health", "/ready")
+	}
+	return proxyTrust.Handler(middleware.RequestID(handler))
+}
+
+// serveMetrics serves m at /metrics on address, sending Serve's result to served, or returns nil if address is empty.
+func serveMetrics(address string, m *metrics.Metrics, served chan<- error) *http.Server {
+	if address == "" {
+		return nil
+	}
+	var listenConfig net.ListenConfig
+	listener, err := listenConfig.Listen(context.Background(), "tcp", address)
+	if err != nil {
+		log.Fatal().Err(err).Str("address", address).Msg("listening for metrics")
+	}
+	log.Info().Str("address", listener.Addr().String()).Msg("serving metrics")
+
+	mux := http.NewServeMux()
+	mux.Handle("GET /metrics", m.Handler())
+	server := &http.Server{Handler: mux, ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 120 * time.Second}
+	go func() { served <- server.Serve(listener) }()
+	return server
+}
+
+// sumCacheStats returns a function that adds up the cache hits and misses of every authenticator in auths.
+func sumCacheStats(auths map[string]*auth.GitHub) func() (hits, misses uint64) {
+	return func() (hits, misses uint64) {
+		for _, g := range auths {
+			h, m := g.CacheStats()
+			hits, misses = hits+h, misses+m
+		}
+		return hits, misses
+	}
+}
+
+// configureLogging applies the configured log format and level to the global logger.
+func configureLogging(opts *config.Options) {
+	if opts.LogFormat == config.LogFormatConsole {
+		log.Logger = zerolog.New(zerolog.ConsoleWriter{Out: os.Stderr, NoColor: !isTerminal(os.Stderr)}).
+			With().Timestamp().Logger()
+	}
+	if level, err := zerolog.ParseLevel(opts.LogLevel); err == nil {
+		zerolog.SetGlobalLevel(level)
+	}
+	if opts.AdditionalLogging {
+		log.Warn().Msg(`additional_logging is deprecated; set log_format = "console" and log_level = "debug" instead`)
+	}
+}
+
+// absolutePath returns path made absolute, or path itself when the working directory is unknown.
+func absolutePath(path string) string {
+	if abs, err := filepath.Abs(path); err == nil {
+		return abs
+	}
+	return path
+}
+
+// isTerminal reports whether f is a character device such as a terminal.
+func isTerminal(f *os.File) bool {
+	info, err := f.Stat()
+	return err == nil && info.Mode()&os.ModeCharDevice != 0
+}
+
+// registerServiceRoutes adds the health and readiness checks, the version at the root, and a JSON 404 for any other path.
+func registerServiceRoutes(mux *http.ServeMux, ready http.Handler) {
+	mux.HandleFunc("GET /health", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.MarshalWrite(w, statusResponse{Status: "ok", Version: version})
+	})
+	mux.Handle("GET /ready", ready)
+	mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.MarshalWrite(w, map[string]string{"version": version})
+	})
+	mux.HandleFunc("/", lfs.NotFoundHandler)
+}
+
+// registerRoutes adds an endpoint's routes to mux, rate limiting the batch and lock routes but not signed transfers.
+func registerRoutes(mux *http.ServeMux, prefix string, handler *lfs.Handler, rateLimitStore limiter.Store) {
+	limited := func(h http.HandlerFunc) http.Handler { return middleware.RateLimit(rateLimitStore, h) }
+
+	mux.Handle(fmt.Sprintf("POST %s/objects/batch", prefix), limited(handler.BatchHandler))
+	mux.Handle(fmt.Sprintf("POST %s/locks", prefix), limited(handler.CreateLockHandler))
+	mux.Handle(fmt.Sprintf("GET %s/locks", prefix), limited(handler.ListLocksHandler))
+	mux.Handle(fmt.Sprintf("POST %s/locks/verify", prefix), limited(handler.VerifyLocksHandler))
+	mux.Handle(fmt.Sprintf("POST %s/locks/{id}/unlock", prefix), limited(handler.UnlockHandler))
+
+	mux.HandleFunc(fmt.Sprintf("GET %s/objects/{oid}", prefix), handler.DownloadHandler)
+	mux.HandleFunc(fmt.Sprintf("PUT %s/objects/{oid}", prefix), handler.UploadHandler)
+	mux.HandleFunc(fmt.Sprintf("POST %s/objects/verify", prefix), handler.VerifyHandler)
+}
+
+// awaitStop waits for a signal or a Serve failure, restores default signal handling and returns the exit code.
+func awaitStop(signalled context.Context, stopSignals context.CancelFunc, served <-chan error, shutdownTimeout string) int {
+	select {
+	case <-signalled.Done():
+		stopSignals()
+		log.Info().Str("timeout", shutdownTimeout).Msg("shutting down; send the signal again to stop immediately")
+		return 0
+	case err := <-served:
+		stopSignals()
+		log.Error().Err(err).Msg("server error")
+		return 1
+	}
+}
+
+// ensureWritableDir creates dir if it is missing and confirms the current process can create files in it.
+func ensureWritableDir(dir string) error {
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		return fmt.Errorf("creating data directory %q: %w", dir, err)
+	}
+	if err := storage.CheckWritableDir(dir); err != nil {
+		return fmt.Errorf("data directory %w", err)
+	}
+	return nil
+}
+
+// Temporary files unmodified for tempFileMaxAge are removed at startup and then every tempSweepInterval.
+const (
+	tempFileMaxAge    = time.Hour
+	tempSweepInterval = time.Hour
+)
+
+// sweepTempFiles removes stale temporary files not inUse from dataDir now, then outside object shards every interval.
+func sweepTempFiles(ctx context.Context, dataDir string, inUse func(path string) bool) {
+	ticker := time.NewTicker(tempSweepInterval)
+	defer ticker.Stop()
+	for skipShards := false; ; skipShards = true {
+		removed, err := storage.RemoveStaleTempFiles(dataDir, tempFileMaxAge, inUse, skipShards)
+		if err != nil {
+			log.Warn().Err(err).Int("removed", removed).Msg("sweeping temporary files")
+		} else if removed > 0 {
+			log.Info().Int("removed", removed).Msg("removed stale temporary files")
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
 }
 
 // signingKeyFile is the name of the auto-generated signing key file within the data directory.

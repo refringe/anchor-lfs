@@ -5,9 +5,9 @@ Thank you for your interest in contributing!
 ## Getting Started
 
 1. Fork the repository and clone your fork
-2. Install Go 1.26+
+2. Install Go 1.27+, and Node.js for the Prettier check that `make check` runs through `npx`
 3. Install dependencies: `go mod download`
-4. Copy and configure: `cp config.toml config.local.toml` (edit as needed)
+4. Copy and configure: `cp config.toml.example config.toml` (edit as needed; `config.toml` is git-ignored)
 5. Run locally: `make run`
 
 ## Development
@@ -20,15 +20,16 @@ Before submitting a PR, run the full check suite:
 make check
 ```
 
-This runs: format check, linter, vet, vulnerability scan, and tests.
+This runs: Go format check, Prettier check (JSON and YAML), linter, vet, vulnerability scan, and tests.
 
 ### Individual commands
 
 ```bash
 make fmt          # Format code
+make prettier     # Format JSON and YAML
 make test         # Run tests with race detector
 make lint         # Run golangci-lint
-make vet          # Run go vet
+make vet          # Run go vet for Linux, macOS and Windows
 make vulncheck    # Run govulncheck
 ```
 

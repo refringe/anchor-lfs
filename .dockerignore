@@ -1,10 +1,6 @@
-data/
-bin/
-.git/
-.idea/
-.vscode/
-.github/
-.env
-coverage.out
-*.test
-.DS_Store
+# Excludes everything except the module files and non-test Go sources the image build compiles.
+*
+!go.mod
+!go.sum
+!**/*.go
+**/*_test.go

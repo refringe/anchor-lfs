@@ -1,6 +1,6 @@
 # Anchor LFS
 
-A lightweight, standalone [Git LFS](https://git-lfs.com/) server written in Go that authenticates users against GitHub organisation and repository permissions.
+A lightweight, standalone [Git LFS](https://git-lfs.com/) server written in Go that authenticates users against their GitHub repository permissions.
 
 ## Features
 
@@ -12,7 +12,8 @@ A lightweight, standalone [Git LFS](https://git-lfs.com/) server written in Go t
 - HMAC-signed transfer URLs with configurable expiration
 - SHA-256 integrity verification on upload
 - Configurable per-endpoint visibility (public/private)
-- Per-IP rate limiting with configurable token bucket
+- Per-IP rate limiting on the batch and lock API
+- Optional Prometheus metrics on a separate port
 - Docker-first deployment
 
 ## Quick Start
@@ -21,17 +22,28 @@ A lightweight, standalone [Git LFS](https://git-lfs.com/) server written in Go t
 
 ```bash
 cp config.toml.example config.toml
+# Linux hosts only: the container runs as uid 100, gid 101 and must be able to write ./data
+mkdir -p data && sudo chown 100:101 data
 # Edit config.toml with your endpoints, then:
 docker compose up -d
 ```
 
+This runs the published image `ghcr.io/refringe/anchor-lfs:latest`. See the [Docker](https://github.com/refringe/anchor-lfs/wiki/Docker) wiki page for release tags and building your own image.
+
+### Release Binary
+
+Each [release](https://github.com/refringe/anchor-lfs/releases) attaches archives for Linux, macOS and Windows (amd64 and arm64) with checksums and build attestations. See [Installation](https://github.com/refringe/anchor-lfs/wiki/Installation#downloading-a-release) for how to verify them.
+
 ### From Source
+
+Requires Go 1.27 or later.
 
 ```bash
 # Build
 make build
 
-# Edit config.toml, then run:
+# Copy config.toml.example, edit it with your endpoints, then run:
+cp config.toml.example config.toml
 ./bin/anchor-lfs
 ```
 
@@ -48,6 +60,7 @@ Full documentation is available on the **[Wiki](https://github.com/refringe/anch
 - **[File Locking](https://github.com/refringe/anchor-lfs/wiki/File-Locking):** Coordinating concurrent edits
 - **[Reverse Proxy](https://github.com/refringe/anchor-lfs/wiki/Reverse-Proxy):** Running behind nginx, Caddy, or Traefik
 - **[Security](https://github.com/refringe/anchor-lfs/wiki/Security):** Security model and best practices
+- **[Operations](https://github.com/refringe/anchor-lfs/wiki/Operations):** Backups, upgrades, key rotation and storage migration
 - **[API Reference](https://github.com/refringe/anchor-lfs/wiki/API-Reference):** Endpoint routes and protocol details
 - **[Troubleshooting](https://github.com/refringe/anchor-lfs/wiki/Troubleshooting):** Common issues and solutions
 
@@ -59,10 +72,11 @@ make run          # Build and run
 make test         # Run tests with race detector
 make test-cover   # Run tests with coverage report
 make lint         # Run golangci-lint
-make fmt          # Format code
+make fmt          # Format Go code
+make prettier     # Format JSON and YAML
 make vet          # Run go vet
 make vulncheck    # Vulnerability scan
-make check        # Run all checks (fmt, lint, vet, vulncheck, test)
+make check        # Run all checks (fmt, prettier, lint, vet, vulncheck, test)
 make tidy         # Run go mod tidy
 make clean        # Remove build artefacts
 ```
@@ -70,7 +84,7 @@ make clean        # Remove build artefacts
 Docker commands:
 
 ```bash
-make docker-build   # Build Docker image
+make docker-build   # Build a local anchor-lfs image
 make docker-up      # Start containers
 make docker-down    # Stop containers
 make docker-logs    # Tail container logs

@@ -5,44 +5,77 @@ import (
 	"fmt"
 	"io/fs"
 	"net/http"
+	"sync"
 
-	"github.com/rs/zerolog/log"
-
+	"github.com/refringe/anchor-lfs/middleware"
 	"github.com/refringe/anchor-lfs/storage"
 )
 
-func (h *Handler) processBatch(r *http.Request, req *BatchRequest, baseURL string) *BatchResponse {
-	resp := &BatchResponse{
-		Transfer: "basic",
-		Objects:  make([]ObjectResponse, 0, len(req.Objects)),
-		HashAlgo: "sha256",
-	}
+// batchConcurrency is the number of objects in one batch request that are looked up in storage at the same time.
+const batchConcurrency = 16
 
-	for _, obj := range req.Objects {
-		if err := r.Context().Err(); err != nil {
+// processBatch builds the response for every object in req, in request order, stopping early if the client goes away.
+func (h *Handler) processBatch(r *http.Request, req *BatchRequest, baseURL string) *BatchResponse {
+	var verify Action
+	if req.Operation == opUpload {
+		verify = h.verifyAction(baseURL)
+	}
+	objects := make([]ObjectResponse, len(req.Objects))
+	slots := make(chan struct{}, batchConcurrency)
+	var wg sync.WaitGroup
+	started := 0
+	for i, obj := range req.Objects {
+		slots <- struct{}{}
+		if r.Context().Err() != nil {
 			break
 		}
+		started++
+		wg.Go(func() {
+			defer func() { <-slots }()
+			objects[i] = h.processObject(r, req.Operation, obj, baseURL, verify)
+		})
+	}
+	wg.Wait()
 
-		if msg := validateObject(obj); msg != "" {
-			resp.Objects = append(resp.Objects, ObjectResponse{
-				OID:  obj.OID,
-				Size: obj.Size,
-				Error: &ObjectError{
-					Code:    422,
-					Message: msg,
-				},
-			})
-			continue
-		}
-		switch req.Operation {
-		case opDownload:
-			resp.Objects = append(resp.Objects, h.processDownload(r, obj, baseURL))
-		case opUpload:
-			resp.Objects = append(resp.Objects, h.processUpload(r, obj, baseURL))
+	return &BatchResponse{
+		Transfer: "basic",
+		Objects:  objects[:started],
+		HashAlgo: hashAlgo,
+	}
+}
+
+// unsupportedHashAlgo answers a batch request naming a hash algorithm other than SHA-256 with a 409 for every object.
+func unsupportedHashAlgo(objects []Object) *BatchResponse {
+	resp := &BatchResponse{Transfer: "basic", Objects: make([]ObjectResponse, len(objects)), HashAlgo: hashAlgo}
+	for i, obj := range objects {
+		resp.Objects[i] = ObjectResponse{
+			OID:   obj.OID,
+			Size:  max(obj.Size, 0),
+			Error: &ObjectError{Code: 409, Message: "unsupported hash algorithm; only 'sha256' is supported"},
 		}
 	}
-
 	return resp
+}
+
+// verifyAction returns the signed verify action that every object of one upload batch shares.
+func (h *Handler) verifyAction(baseURL string) Action {
+	signed := h.signer.Sign(opVerify, baseURL, h.endpoint.Path+"/objects/verify")
+	return Action{Href: signed.Href, ExpiresIn: signed.ExpiresIn, ExpiresAt: signed.ExpiresAt}
+}
+
+// processObject builds the response for one object of a batch request.
+func (h *Handler) processObject(r *http.Request, operation string, obj Object, baseURL string, verify Action) ObjectResponse {
+	if msg := validateObject(obj); msg != "" {
+		return ObjectResponse{
+			OID:   obj.OID,
+			Size:  max(obj.Size, 0),
+			Error: &ObjectError{Code: 422, Message: msg},
+		}
+	}
+	if operation == opDownload {
+		return h.processDownload(r, obj, baseURL)
+	}
+	return h.processUpload(r, obj, baseURL, verify)
 }
 
 func (h *Handler) processDownload(r *http.Request, obj Object, baseURL string) ObjectResponse {
@@ -53,7 +86,7 @@ func (h *Handler) processDownload(r *http.Request, obj Object, baseURL string) O
 		if errors.Is(err, fs.ErrNotExist) {
 			resp.Error = &ObjectError{Code: 404, Message: "object not found"}
 		} else {
-			log.Error().Err(err).Str("oid", obj.OID).Msg("reading object size")
+			middleware.Logger(r.Context()).Error().Err(err).Str("oid", obj.OID).Msg("reading object size")
 			resp.Error = &ObjectError{Code: 500, Message: msgInternalError}
 		}
 		return resp
@@ -71,7 +104,7 @@ func (h *Handler) processDownload(r *http.Request, obj Object, baseURL string) O
 	if p, ok := h.store.(storage.PresignedURLProvider); ok {
 		href, err := p.PresignGet(r.Context(), h.endpoint.Path, obj.OID, h.signer.Expiry())
 		if err != nil {
-			log.Error().Err(err).Str("oid", obj.OID).Msg("presigning download URL")
+			middleware.Logger(r.Context()).Error().Err(err).Str("oid", obj.OID).Msg("presigning download URL")
 			resp.Error = &ObjectError{Code: 500, Message: msgInternalError}
 			return resp
 		}
@@ -84,7 +117,7 @@ func (h *Handler) processDownload(r *http.Request, obj Object, baseURL string) O
 	}
 
 	path := fmt.Sprintf("%s/objects/%s", h.endpoint.Path, obj.OID)
-	signed := h.signer.Sign(baseURL, path)
+	signed := h.signer.Sign(opDownload, baseURL, path)
 	resp.Authenticated = new(bool)
 	*resp.Authenticated = true
 	resp.Actions = map[string]Action{
@@ -97,7 +130,7 @@ func (h *Handler) processDownload(r *http.Request, obj Object, baseURL string) O
 	return resp
 }
 
-func (h *Handler) processUpload(r *http.Request, obj Object, baseURL string) ObjectResponse {
+func (h *Handler) processUpload(r *http.Request, obj Object, baseURL string, verify Action) ObjectResponse {
 	resp := ObjectResponse{OID: obj.OID, Size: obj.Size}
 
 	if obj.Size > h.maxUploadSize {
@@ -109,44 +142,46 @@ func (h *Handler) processUpload(r *http.Request, obj Object, baseURL string) Obj
 	}
 
 	// If the object already exists, omit actions to signal the server has it.
-	exists, err := h.store.Exists(r.Context(), h.endpoint.Path, obj.OID)
-	if err != nil {
-		log.Error().Err(err).Str("oid", obj.OID).Msg("checking object existence")
-		resp.Error = &ObjectError{Code: 500, Message: msgInternalError}
+	size, err := h.store.Size(r.Context(), h.endpoint.Path, obj.OID)
+	switch {
+	case err == nil && size == obj.Size:
 		return resp
-	}
-	if exists {
+	case err == nil:
+		resp.Error = &ObjectError{
+			Code:    422,
+			Message: fmt.Sprintf("object size mismatch: expected %d, found %d", obj.Size, size),
+		}
+		return resp
+	case !errors.Is(err, fs.ErrNotExist):
+		middleware.Logger(r.Context()).Error().Err(err).Str("oid", obj.OID).Msg("checking object existence")
+		resp.Error = &ObjectError{Code: 500, Message: msgInternalError}
 		return resp
 	}
 
 	// When the storage backend provides presigned URLs, return a direct-to-storage upload URL. The verify action always
 	// points back at this server because verification is a server-side check against storage.
 	if p, ok := h.store.(storage.PresignedURLProvider); ok {
-		href, err := p.PresignPut(r.Context(), h.endpoint.Path, obj.OID, h.signer.Expiry())
+		href, header, err := p.PresignPut(r.Context(), h.endpoint.Path, obj.OID, obj.Size, h.signer.Expiry())
+		if errors.Is(err, storage.ErrObjectTooLarge) {
+			resp.Error = &ObjectError{Code: 422, Message: "object exceeds the maximum size for a direct upload to storage"}
+			return resp
+		}
 		if err != nil {
-			log.Error().Err(err).Str("oid", obj.OID).Msg("presigning upload URL")
+			middleware.Logger(r.Context()).Error().Err(err).Str("oid", obj.OID).Msg("presigning upload URL")
 			resp.Error = &ObjectError{Code: 500, Message: msgInternalError}
 			return resp
 		}
-		verifyPath := fmt.Sprintf("%s/objects/verify", h.endpoint.Path)
-		signedVerify := h.signer.Sign(baseURL, verifyPath)
 		resp.Authenticated = new(bool)
 		*resp.Authenticated = true
 		resp.Actions = map[string]Action{
-			opUpload: {Href: href, ExpiresIn: int64(h.signer.Expiry().Seconds())},
-			"verify": {
-				Href:      signedVerify.Href,
-				ExpiresIn: signedVerify.ExpiresIn,
-				ExpiresAt: signedVerify.ExpiresAt,
-			},
+			opUpload: {Href: href, Header: header, ExpiresIn: int64(h.signer.Expiry().Seconds())},
+			opVerify: verify,
 		}
 		return resp
 	}
 
 	uploadPath := fmt.Sprintf("%s/objects/%s", h.endpoint.Path, obj.OID)
-	verifyPath := fmt.Sprintf("%s/objects/verify", h.endpoint.Path)
-	signedUpload := h.signer.Sign(baseURL, uploadPath)
-	signedVerify := h.signer.Sign(baseURL, verifyPath)
+	signedUpload := h.signer.Sign(opUpload, baseURL, uploadPath)
 	resp.Authenticated = new(bool)
 	*resp.Authenticated = true
 	resp.Actions = map[string]Action{
@@ -155,11 +190,7 @@ func (h *Handler) processUpload(r *http.Request, obj Object, baseURL string) Obj
 			ExpiresIn: signedUpload.ExpiresIn,
 			ExpiresAt: signedUpload.ExpiresAt,
 		},
-		"verify": {
-			Href:      signedVerify.Href,
-			ExpiresIn: signedVerify.ExpiresIn,
-			ExpiresAt: signedVerify.ExpiresAt,
-		},
+		opVerify: verify,
 	}
 	return resp
 }
@@ -167,7 +198,7 @@ func (h *Handler) processUpload(r *http.Request, obj Object, baseURL string) Obj
 // validateObject returns an error message if the object is invalid, or an
 // empty string if it passes validation.
 func validateObject(obj Object) string {
-	if !isValidOID(obj.OID) {
+	if !storage.IsValidOID(obj.OID) {
 		return "invalid object id"
 	}
 	if obj.Size < 0 {

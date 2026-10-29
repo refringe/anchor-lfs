@@ -5,17 +5,101 @@ on:
     tags:
       - 'v[0-9]+.[0-9]+.[0-9]+'
 
-permissions:
-  contents: write
-  packages: write
+permissions: {}
 
 jobs:
-  release:
+  on-main:
+    name: Tag on main
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      newest: ${{ steps.newest.outputs.newest }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
+          persist-credentials: false
+
+      - name: Check the tagged commit is on main
+        run: git merge-base --is-ancestor "$GITHUB_SHA" origin/main
+
+      - name: Check whether the tag is the newest version
+        id: newest
+        run: |
+          newest=$(git tag --list 'v[0-9]*.[0-9]*.[0-9]*' --sort=-version:refname | head -n 1)
+          if [ "$newest" = "$GITHUB_REF_NAME" ]; then
+            echo "newest=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "newest=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  format:
+    uses: ./.github/workflows/format.yml
+    permissions:
+      contents: read
+
+  quality:
+    uses: ./.github/workflows/quality.yml
+    permissions:
+      contents: read
+
+  tests:
+    uses: ./.github/workflows/tests.yml
+    permissions:
+      contents: read
+
+  vulnerability:
+    uses: ./.github/workflows/vulnerability.yml
+    permissions:
+      contents: read
+
+  binaries:
+    name: Build binaries
+    needs: [on-main, format, quality, tests, vulnerability]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Build release archives
+        run: make dist VERSION="$GITHUB_REF_NAME"
+
+      - uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-checksums: dist/checksums.txt
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: dist
+          path: dist/
+          if-no-files-found: error
+
+  image:
+    name: Publish image
+    needs: [on-main, format, quality, tests, vulnerability]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    outputs:
+      version: ${{ steps.docker-meta.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Set build metadata
         id: meta
@@ -24,7 +108,7 @@ jobs:
           echo "commit=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
           echo "date=$(date -u '+%Y-%m-%dT%H:%M:%SZ')" >> "$GITHUB_OUTPUT"
 
-      - uses: docker/login-action@v4
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -32,21 +116,24 @@ jobs:
 
       - name: Docker metadata
         id: docker-meta
-        uses: docker/metadata-action@v6
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         with:
           images: ghcr.io/${{ github.repository }}
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
             type=semver,pattern={{major}},enable=${{ !startsWith(github.ref, 'refs/tags/v0.') }}
-            type=raw,value=latest
+          flavor: latest=${{ needs.on-main.outputs.newest }}
 
-      - uses: docker/setup-buildx-action@v4
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
-      - uses: docker/build-push-action@v7
+      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        id: build
         with:
           context: .
           push: true
+          provenance: mode=max
+          sbom: true
           platforms: linux/amd64,linux/arm64
           tags: ${{ steps.docker-meta.outputs.tags }}
           labels: ${{ steps.docker-meta.outputs.labels }}
@@ -57,31 +144,46 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      - name: Generate changelog
-        id: changelog
-        run: |
-          PREV_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
-          if [ -z "$PREV_TAG" ]; then
-            echo "changelog<<EOF" >> "$GITHUB_OUTPUT"
-            git log --oneline --no-decorate >> "$GITHUB_OUTPUT"
-            echo "EOF" >> "$GITHUB_OUTPUT"
-          else
-            echo "changelog<<EOF" >> "$GITHUB_OUTPUT"
-            git log --oneline --no-decorate "${PREV_TAG}..HEAD" >> "$GITHUB_OUTPUT"
-            echo "EOF" >> "$GITHUB_OUTPUT"
-          fi
+      - uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-name: ghcr.io/${{ github.repository }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+          create-storage-record: false
 
-      - uses: softprops/action-gh-release@v3
+  github-release:
+    name: GitHub release
+    needs: [on-main, binaries, image]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: dist
+          path: dist
+
+      - name: Write release notes
+        env:
+          IMAGE: ghcr.io/${{ github.repository }}:${{ needs.image.outputs.version }}
+        run: |
+          {
+            .github/scripts/release-notes.sh "$GITHUB_REF_NAME"
+            printf '\n## Docker\n\n```\ndocker pull %s\ngh attestation verify oci://%s --repo %s\n```\n' "$IMAGE" "$IMAGE" "$GITHUB_REPOSITORY"
+            printf '\n## Verifying downloads\n\n```\nsha256sum --check --ignore-missing checksums.txt\n'
+            printf 'gh attestation verify <archive> --repo %s\n```\n' "$GITHUB_REPOSITORY"
+          } > release-notes.md
+
+      - uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
           name: ${{ github.ref_name }}
-          body: |
-            ## Changes
-
-            ${{ steps.changelog.outputs.changelog }}
-
-            ## Docker
-
-            ```
-            docker pull ghcr.io/${{ github.repository }}:${{ github.ref_name }}
-            ```
+          body_path: release-notes.md
+          files: dist/*
+          fail_on_unmatched_files: true
+          make_latest: ${{ needs.on-main.outputs.newest }}
           generate_release_notes: false

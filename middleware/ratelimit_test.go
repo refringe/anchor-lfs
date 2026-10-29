@@ -2,7 +2,7 @@ package middleware
 
 import (
 	"context"
-	"encoding/json"
+	"encoding/json/v2"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -81,32 +81,10 @@ func TestRateLimitBlocks(t *testing.T) {
 	}
 
 	var body map[string]string
-	if err := json.NewDecoder(w.Body).Decode(&body); err != nil {
+	if err := json.UnmarshalRead(w.Body, &body); err != nil {
 		t.Fatalf("decoding body: %v", err)
 	}
 	if body["message"] != "rate limit exceeded" {
 		t.Fatalf("expected rate limit message, got %q", body["message"])
-	}
-}
-
-func TestClientIPFallback(t *testing.T) {
-	req := httptest.NewRequestWithContext(context.Background(), "GET", "/", nil)
-	req.RemoteAddr = "10.0.0.1:1234"
-
-	ip := ClientIP(req)
-	if ip == "" {
-		t.Fatal("expected non-empty IP")
-	}
-}
-
-func TestClientIPWithForwardedFor(t *testing.T) {
-	req := httptest.NewRequestWithContext(context.Background(), "GET", "/", nil)
-	req.RemoteAddr = "10.0.0.1:1234"
-	req.Header.Set("X-Forwarded-For", "8.8.8.8")
-
-	ip := ClientIP(req)
-	// RightmostNonPrivate picks the rightmost non-private IP from the header.
-	if ip != "8.8.8.8" {
-		t.Fatalf("expected 8.8.8.8, got %q", ip)
 	}
 }

@@ -7,17 +7,20 @@ import (
 	"strings"
 )
 
-// safeEndpointPattern matches only characters safe for directory names.
-var safeEndpointPattern = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
+// safeEndpointPattern matches names of letters, digits, dots, underscores and hyphens that do not start or end with a dot.
+var safeEndpointPattern = regexp.MustCompile(`^[a-zA-Z0-9_-]([a-zA-Z0-9._-]*[a-zA-Z0-9_-])?$`)
 
 // InvalidEndpoint is the fallback directory name for unsafe endpoint paths.
 const InvalidEndpoint = "_invalid"
 
-// Endpoint converts an endpoint path into a safe directory name. It strips leading slashes, replaces path separators
-// with underscores, and rejects anything containing path traversal or characters outside the safe alphanumeric set.
-// Returns InvalidEndpoint for unsafe input.
+// Endpoint converts an endpoint path into a safe directory name, or InvalidEndpoint for unsafe input.
 func Endpoint(endpoint string) string {
 	s := strings.TrimLeft(endpoint, "/")
+	for segment := range strings.FieldsFuncSeq(s, isSeparator) {
+		if segment == "." || segment == ".." {
+			return InvalidEndpoint
+		}
+	}
 	s = strings.ReplaceAll(s, "/", "_")
 	s = strings.ReplaceAll(s, "\\", "_")
 
@@ -31,4 +34,9 @@ func Endpoint(endpoint string) string {
 		return InvalidEndpoint
 	}
 	return s
+}
+
+// isSeparator reports whether r separates the segments of an endpoint path.
+func isSeparator(r rune) bool {
+	return r == '/' || r == '\\'
 }

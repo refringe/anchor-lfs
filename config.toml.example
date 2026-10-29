@@ -3,15 +3,34 @@
 [options]
 listen_address = ":5420"
 data_directory = "./data"
-additional_logging = false
 #base_url = "https://lfs.example.com"
+
+# Log output: "json" (default) or "console" for human-readable lines, at level "debug", "info" (default), "warn" or
+# "error". Every request is logged at info level (warn for 4xx, error for 5xx, debug for successful health checks);
+# set access_log = false to turn that off.
+log_format = "json"
+log_level = "info"
+#access_log = true
+
+# Serve Prometheus metrics at /metrics on this separate address (default: off). The metrics have no authentication, so
+# bind them to loopback or a private network.
+#metrics_address = "127.0.0.1:9420"
+
+# Peers allowed to set X-Forwarded-For, -Host and -Proto (default: loopback and private ranges). These headers are
+# removed from requests sent by any other peer. Set to [] to trust no one.
+#trusted_proxies = ["127.0.0.0/8", "::1/128", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "fc00::/7"]
 
 # Maximum upload size in bytes (default: 5 GiB = 5368709120).
 #max_upload_size = 5368709120
 
-# Rate limiting: tokens per window (default: 10000 per 24h).
-#rate_limit_tokens = 10000
-#rate_limit_window = "24h"
+# How long an upload may go without receiving data before it is abandoned with 408 Request Timeout (default: 60s).
+# Uploads can take as long as they need while data keeps arriving. Set to "0s" to wait indefinitely.
+#upload_idle_timeout = "60s"
+
+# Per-IP rate limit on batch and lock requests: tokens per fixed window (default: 600 per 1m). Signed object
+# transfers are not rate limited.
+#rate_limit_tokens = 600
+#rate_limit_window = "1m"
 
 # GitHub auth cache TTL (default: 60s). Set to "0s" to disable caching.
 #auth_cache_ttl = "60s"
@@ -23,6 +42,10 @@ additional_logging = false
 
 # How long signed transfer URLs remain valid (default: 10m).
 #url_expiry = "10m"
+
+# How long a shutdown waits for in-flight transfers before closing their connections (default: 30s). Keep the stop
+# grace period of Docker, systemd or Kubernetes above this.
+#shutdown_timeout = "30s"
 
 # Each [[endpoints]] block configures a repository whose LFS objects will be served. You can define multiple endpoints
 # for a single server instance.
@@ -43,7 +66,7 @@ authentication = "github"
 #visibility = "private"
 #authentication = "github"
 
-# GitHub Enterprise: set github_api_url to your instance's API endpoint
+# GitHub Enterprise: set github_api_url to your instance's API endpoint (https; it receives every client token)
 #[[endpoints]]
 #name = "GHE Repo"
 #url = "https://github.example.com/org/repo"
@@ -52,7 +75,8 @@ authentication = "github"
 #authentication = "github"
 #github_api_url = "https://github.example.com/api/v3/"
 
-# Local/testing: no authentication required
+# Local/testing: no authentication required. Anyone can read, write and release any lock, so "none" is only
+# accepted with visibility = "public".
 #[[endpoints]]
 #name = "Local Dev"
 #url = "https://github.com/dev/test-repo"

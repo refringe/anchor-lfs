@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"github.com/refringe/anchor-lfs/internal/sanitise"
 )
@@ -24,14 +25,64 @@ var ErrHashMismatch = errors.New("hash mismatch")
 // ErrInsufficientStorage is returned when the filesystem has no space left.
 var ErrInsufficientStorage = errors.New("insufficient storage")
 
+// CheckWritableDir confirms the current process can create files in dir.
+func CheckWritableDir(dir string) error {
+	f, err := os.CreateTemp(dir, ".write-check-*")
+	if err != nil {
+		return fmt.Errorf("%q is not writable: %w", dir, err)
+	}
+	name := f.Name()
+	_ = f.Close()
+	if err := os.Remove(name); err != nil {
+		return fmt.Errorf("removing write check file: %w", err)
+	}
+	return nil
+}
+
 // Local stores objects on the local filesystem.
 type Local struct {
 	basePath string
+
+	mu      sync.Mutex
+	writing map[string]struct{}
 }
 
 // NewLocal creates a Local storage adapter rooted at basePath.
 func NewLocal(basePath string) *Local {
-	return &Local{basePath: basePath}
+	return &Local{basePath: basePath, writing: make(map[string]struct{})}
+}
+
+// Writing reports whether path, slash-separated and relative to basePath, is a temporary file Put is still writing.
+func (l *Local) Writing(path string) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	_, ok := l.writing[path]
+	return ok
+}
+
+// trackWriting marks tmpPath as being written until the returned function is called.
+func (l *Local) trackWriting(tmpPath string) (done func()) {
+	rel, err := filepath.Rel(l.basePath, tmpPath)
+	if err != nil {
+		return func() {}
+	}
+	key := filepath.ToSlash(rel)
+	l.mu.Lock()
+	l.writing[key] = struct{}{}
+	l.mu.Unlock()
+	return func() {
+		l.mu.Lock()
+		delete(l.writing, key)
+		l.mu.Unlock()
+	}
+}
+
+// Check confirms the storage directory's free space can be read.
+func (l *Local) Check(ctx context.Context) error {
+	if _, err := l.AvailableSpace(ctx); err != nil {
+		return fmt.Errorf("reading free space: %w", err)
+	}
+	return nil
 }
 
 // Exists reports whether the object exists in storage.
@@ -39,7 +90,11 @@ func (l *Local) Exists(ctx context.Context, endpoint, oid string) (bool, error) 
 	if err := ctx.Err(); err != nil {
 		return false, err
 	}
-	_, err := os.Stat(l.filePath(endpoint, oid))
+	path, err := l.filePath(endpoint, oid)
+	if err != nil {
+		return false, err
+	}
+	_, err = os.Stat(path)
 	if err == nil {
 		return true, nil
 	}
@@ -54,8 +109,11 @@ func (l *Local) Get(ctx context.Context, endpoint, oid string) (io.ReadCloser, i
 	if err := ctx.Err(); err != nil {
 		return nil, 0, err
 	}
-	path := l.filePath(endpoint, oid)
-	f, err := os.Open(path) //nolint:gosec // path is constructed from validated OID hex strings
+	path, err := l.filePath(endpoint, oid)
+	if err != nil {
+		return nil, 0, err
+	}
+	f, err := os.Open(path) //nolint:gosec // path is built from a validated 64-character hex OID
 	if err != nil {
 		return nil, 0, fmt.Errorf("opening object %s: %w", oid, err)
 	}
@@ -71,21 +129,30 @@ func (l *Local) Get(ctx context.Context, endpoint, oid string) (io.ReadCloser, i
 // the OID. The context is not checked during I/O because the reader (typically
 // an http.Request.Body) will return an error when the client disconnects,
 // which naturally terminates the io.Copy.
-func (l *Local) Put(ctx context.Context, endpoint, oid string, reader io.Reader) error {
+func (l *Local) Put(ctx context.Context, endpoint, oid string, reader io.Reader, _ int64) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
 
-	destPath := l.filePath(endpoint, oid)
+	destPath, err := l.filePath(endpoint, oid)
+	if err != nil {
+		return err
+	}
 	if err := os.MkdirAll(filepath.Dir(destPath), 0o750); err != nil {
 		return fmt.Errorf("creating directory: %w", err)
 	}
 
-	tmp, err := os.CreateTemp(filepath.Dir(destPath), ".tmp-*")
+	tmpDir := filepath.Join(l.basePath, sanitise.Endpoint(endpoint), uploadTempDir)
+	if err := os.MkdirAll(tmpDir, 0o750); err != nil {
+		return fmt.Errorf("creating directory: %w", err)
+	}
+	tmp, err := os.CreateTemp(tmpDir, TempFilePrefix+"*")
 	if err != nil {
 		return fmt.Errorf("creating temp file: %w", err)
 	}
 	tmpPath := tmp.Name()
+	untrack := l.trackWriting(tmpPath)
+	defer untrack()
 	closed := false
 	defer func() {
 		if !closed {
@@ -130,31 +197,22 @@ func (l *Local) Size(ctx context.Context, endpoint, oid string) (int64, error) {
 	if err := ctx.Err(); err != nil {
 		return 0, err
 	}
-	info, err := os.Stat(l.filePath(endpoint, oid))
+	path, err := l.filePath(endpoint, oid)
+	if err != nil {
+		return 0, err
+	}
+	info, err := os.Stat(path)
 	if err != nil {
 		return 0, fmt.Errorf("stat object %s: %w", oid, err)
 	}
 	return info.Size(), nil
 }
 
-// filePath returns the sharded storage path for the given OID. The result is verified to reside within basePath as a
-// defence-in-depth measure against path traversal (callers should also validate that oid is a 64-character hex string
-// via lfs.isValidOID). Short OIDs are stored without sharding as a safety fallback.
-func (l *Local) filePath(endpoint, oid string) string {
-	var p string
-	if len(oid) < 4 {
-		p = filepath.Join(l.basePath, sanitise.Endpoint(endpoint), oid)
-	} else {
-		p = filepath.Join(l.basePath, sanitise.Endpoint(endpoint), oid[:2], oid[2:4], oid)
+// filePath returns the sharded storage path for the given OID, or ErrInvalidOID when oid is not a SHA-256 hex digest.
+func (l *Local) filePath(endpoint, oid string) (string, error) {
+	oid, err := normaliseOID(oid)
+	if err != nil {
+		return "", err
 	}
-
-	p = filepath.Clean(p)
-
-	// Verify the resolved path stays within basePath. filepath.Rel computes a relative path from basePath to p; if
-	// the result starts with ".." the path escapes the storage root.
-	rel, err := filepath.Rel(l.basePath, p)
-	if err != nil || strings.HasPrefix(rel, "..") {
-		return l.basePath
-	}
-	return filepath.Join(l.basePath, rel)
+	return filepath.Join(l.basePath, sanitise.Endpoint(endpoint), oid[:2], oid[2:4], oid), nil
 }

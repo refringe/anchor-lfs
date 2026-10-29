@@ -2,21 +2,18 @@ package middleware
 
 import (
 	"net/http"
+	"slices"
 
 	"github.com/felixge/httpsnoop"
 	"github.com/rs/zerolog"
-	"github.com/rs/zerolog/log"
 )
 
-// Logging is HTTP middleware that logs each request with method, path, status
-// code, duration, bytes written, and client IP. It uses httpsnoop to correctly
-// capture the response status without breaking optional http.ResponseWriter
-// interfaces (Flusher, Hijacker, etc.).
-func Logging(next http.Handler) http.Handler {
+// Logging logs every request, at debug level for successful requests to quietPaths and by status otherwise.
+func Logging(next http.Handler, quietPaths ...string) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		m := httpsnoop.CaptureMetrics(next, w, r)
 
-		event := logEventForStatus(m.Code)
+		event := logEventForStatus(Logger(r.Context()), m.Code, slices.Contains(quietPaths, r.URL.Path))
 		event.
 			Str("method", r.Method).
 			Str("path", r.URL.Path).
@@ -28,13 +25,15 @@ func Logging(next http.Handler) http.Handler {
 	})
 }
 
-func logEventForStatus(status int) *zerolog.Event {
+func logEventForStatus(logger *zerolog.Logger, status int, quiet bool) *zerolog.Event {
 	switch {
 	case status >= 500:
-		return log.Error()
+		return logger.Error()
 	case status >= 400:
-		return log.Warn()
+		return logger.Warn()
+	case quiet:
+		return logger.Debug()
 	default:
-		return log.Info()
+		return logger.Info()
 	}
 }

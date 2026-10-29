@@ -2,23 +2,30 @@ package lfs
 
 import (
 	"bytes"
+	"cmp"
 	"context"
-	"encoding/json"
+	"encoding/json/v2"
 	"errors"
 	"fmt"
+	"io"
+	"maps"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"testing/iotest"
 	"time"
 
 	"github.com/refringe/anchor-lfs/auth"
 	"github.com/refringe/anchor-lfs/config"
 	"github.com/refringe/anchor-lfs/internal/testutil"
+	"github.com/refringe/anchor-lfs/middleware"
 	"github.com/refringe/anchor-lfs/storage"
 )
 
-func testHandler(t *testing.T) (*Handler, *storage.Local, *URLSigner) {
+// testHandler returns a handler for a public /org/repo endpoint on local storage, with options applied to its config.
+func testHandler(t *testing.T, options ...func(*HandlerConfig)) (*Handler, *storage.Local, *URLSigner) {
 	t.Helper()
 	dir := t.TempDir()
 	store := storage.NewLocal(dir)
@@ -26,32 +33,34 @@ func testHandler(t *testing.T) (*Handler, *storage.Local, *URLSigner) {
 	if err != nil {
 		t.Fatalf("NewURLSigner: %v", err)
 	}
-	lockStore := NewFileLockStore(dir)
-	ep := &config.Endpoint{
-		Name:           "test",
-		URL:            "https://github.com/org/repo",
-		Path:           "/org/repo",
-		Visibility:     "public",
-		Authentication: "none",
-		GitHubOwner:    "org",
-		GitHubRepo:     "repo",
-	}
-	h := NewHandler(HandlerConfig{
-		Endpoint:      ep,
+	cfg := HandlerConfig{
+		Endpoint: &config.Endpoint{
+			Name:           "test",
+			URL:            "https://github.com/org/repo",
+			Path:           "/org/repo",
+			Visibility:     "public",
+			Authentication: "none",
+			GitHubOwner:    "org",
+			GitHubRepo:     "repo",
+		},
 		Store:         store,
 		Auth:          &auth.None{},
 		MaxUploadSize: 5 << 30,
 		Signer:        signer,
-		LockStore:     lockStore,
-	})
-	return h, store, signer
+		LockStore:     NewFileLockStore(dir),
+	}
+	for _, option := range options {
+		option(&cfg)
+	}
+	return NewHandler(cfg), store, cfg.Signer
 }
 
-// signedURI returns a signed request URI for test requests to transfer endpoints.
-func signedURI(signer *URLSigner, path string) string {
-	signed := signer.Sign("http://test", path)
-	// Strip the scheme+host to get just the request URI.
-	return signed.Href[len("http://test"):]
+// testBaseURL is the base URL of requests built by httptest.NewRequest from a path.
+const testBaseURL = "http://example.com"
+
+// signedURI returns the request URI of a URL signed for operation on path at testBaseURL.
+func signedURI(signer *URLSigner, operation, path string) string {
+	return strings.TrimPrefix(signer.Sign(operation, testBaseURL, path).Href, testBaseURL)
 }
 
 func TestBatchDownloadNotFound(t *testing.T) {
@@ -75,7 +84,7 @@ func TestBatchDownloadNotFound(t *testing.T) {
 	}
 
 	var resp BatchResponse
-	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+	if err := json.UnmarshalRead(w.Body, &resp); err != nil {
 		t.Fatalf("decoding response: %v", err)
 	}
 
@@ -110,9 +119,12 @@ func TestBatchUploadNewObject(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d", w.Code)
 	}
+	if got := w.Header().Get("Cache-Control"); got != "no-store" {
+		t.Errorf("Cache-Control = %q, want %q", got, "no-store")
+	}
 
 	var resp BatchResponse
-	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+	if err := json.UnmarshalRead(w.Body, &resp); err != nil {
 		t.Fatalf("decoding response: %v", err)
 	}
 
@@ -134,7 +146,7 @@ func TestUploadAndDownload(t *testing.T) {
 	oid := testutil.SHA256Hex(data)
 
 	// Upload.
-	uploadURI := signedURI(signer, "/org/repo/objects/"+oid)
+	uploadURI := signedURI(signer, opUpload, "/org/repo/objects/"+oid)
 	uploadReq := httptest.NewRequestWithContext(context.Background(), "PUT", uploadURI, bytes.NewReader(data))
 	uploadReq.ContentLength = int64(len(data))
 	uploadReq.SetPathValue("oid", oid)
@@ -146,7 +158,7 @@ func TestUploadAndDownload(t *testing.T) {
 	}
 
 	// Download.
-	downloadURI := signedURI(signer, "/org/repo/objects/"+oid)
+	downloadURI := signedURI(signer, opDownload, "/org/repo/objects/"+oid)
 	downloadReq := httptest.NewRequestWithContext(context.Background(), "GET", downloadURI, nil)
 	downloadReq.SetPathValue("oid", oid)
 	dw := httptest.NewRecorder()
@@ -168,7 +180,7 @@ func TestDownloadSetsETag(t *testing.T) {
 	oid := testutil.SHA256Hex(data)
 
 	// Upload first.
-	uploadURI := signedURI(signer, "/org/repo/objects/"+oid)
+	uploadURI := signedURI(signer, opUpload, "/org/repo/objects/"+oid)
 	uploadReq := httptest.NewRequestWithContext(context.Background(), "PUT", uploadURI, bytes.NewReader(data))
 	uploadReq.ContentLength = int64(len(data))
 	uploadReq.SetPathValue("oid", oid)
@@ -176,7 +188,7 @@ func TestDownloadSetsETag(t *testing.T) {
 	h.UploadHandler(uw, uploadReq)
 
 	// Download and check ETag.
-	downloadURI := signedURI(signer, "/org/repo/objects/"+oid)
+	downloadURI := signedURI(signer, opDownload, "/org/repo/objects/"+oid)
 	downloadReq := httptest.NewRequestWithContext(context.Background(), "GET", downloadURI, nil)
 	downloadReq.SetPathValue("oid", oid)
 	dw := httptest.NewRecorder()
@@ -191,13 +203,81 @@ func TestDownloadSetsETag(t *testing.T) {
 	}
 }
 
+func TestDownloadRangeConditionalAndHead(t *testing.T) {
+	h, store, signer := testHandler(t)
+	data := []byte("0123456789")
+	oid := testutil.SHA256Hex(data)
+	if err := store.Put(context.Background(), h.endpoint.Path, oid, bytes.NewReader(data), int64(len(data))); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+
+	tests := []struct {
+		name       string
+		method     string
+		header     http.Header
+		wantStatus int
+		wantBody   string
+		wantHeader http.Header
+	}{
+		{
+			name:       "range",
+			method:     http.MethodGet,
+			header:     http.Header{"Range": {"bytes=2-5"}},
+			wantStatus: http.StatusPartialContent,
+			wantBody:   "2345",
+			wantHeader: http.Header{"Content-Range": {"bytes 2-5/10"}, "Content-Length": {"4"}},
+		},
+		{
+			name:       "matching etag",
+			method:     http.MethodGet,
+			header:     http.Header{"If-None-Match": {`"` + oid + `"`}},
+			wantStatus: http.StatusNotModified,
+		},
+		{
+			name:       "other etag",
+			method:     http.MethodGet,
+			header:     http.Header{"If-None-Match": {`"other"`}},
+			wantStatus: http.StatusOK,
+			wantBody:   string(data),
+		},
+		{
+			name:       "head",
+			method:     http.MethodHead,
+			wantStatus: http.StatusOK,
+			wantHeader: http.Header{"Content-Length": {"10"}, "Accept-Ranges": {"bytes"}},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			uri := signedURI(signer, opDownload, "/org/repo/objects/"+oid)
+			req := httptest.NewRequestWithContext(context.Background(), tt.method, uri, nil)
+			maps.Copy(req.Header, tt.header)
+			req.SetPathValue("oid", oid)
+			w := httptest.NewRecorder()
+			h.DownloadHandler(w, req)
+
+			if w.Code != tt.wantStatus || w.Body.String() != tt.wantBody {
+				t.Fatalf("got %d %q, want %d %q", w.Code, w.Body.String(), tt.wantStatus, tt.wantBody)
+			}
+			if got := w.Header().Get("Cache-Control"); got != "no-store" {
+				t.Errorf("Cache-Control = %q, want %q", got, "no-store")
+			}
+			for key, want := range tt.wantHeader {
+				if got := w.Header().Get(key); got != want[0] {
+					t.Errorf("%s = %q, want %q", key, got, want[0])
+				}
+			}
+		})
+	}
+}
+
 func TestUploadHashMismatch(t *testing.T) {
 	h, _, signer := testHandler(t)
 
 	data := []byte("test file content")
 	badOID := "0000000000000000000000000000000000000000000000000000000000000000"
 
-	uri := signedURI(signer, "/org/repo/objects/"+badOID)
+	uri := signedURI(signer, opUpload, "/org/repo/objects/"+badOID)
 	req := httptest.NewRequestWithContext(context.Background(), "PUT", uri, bytes.NewReader(data))
 	req.ContentLength = int64(len(data))
 	req.SetPathValue("oid", badOID)
@@ -209,65 +289,190 @@ func TestUploadHashMismatch(t *testing.T) {
 	}
 }
 
-func TestUploadMissingContentLength(t *testing.T) {
-	h, _, signer := testHandler(t)
+// putFuncStore wraps a real storage adapter, replacing Put with put.
+type putFuncStore struct {
+	storage.Adapter
+	put func(body io.Reader) error
+}
 
-	oid := "deadbeef00000000000000000000000000000000000000000000000000000000"
-	uri := signedURI(signer, "/org/repo/objects/"+oid)
-	req := httptest.NewRequestWithContext(context.Background(), "PUT", uri, strings.NewReader("data"))
-	req.ContentLength = -1
-	req.SetPathValue("oid", oid)
-	w := httptest.NewRecorder()
-	h.UploadHandler(w, req)
+func (s *putFuncStore) Put(_ context.Context, _, _ string, body io.Reader, _ int64) error {
+	return s.put(body)
+}
 
-	if w.Code != http.StatusBadRequest {
-		t.Fatalf("expected 400, got %d", w.Code)
+func TestUploadInterruptedIsAClientError(t *testing.T) {
+	data := []byte("interrupted upload")
+	oid := testutil.SHA256Hex(data)
+	tests := []struct {
+		name       string
+		body       io.Reader
+		put        func(cancel context.CancelFunc, body io.Reader) error
+		wantStatus int
+	}{
+		{
+			name: "body read fails",
+			body: io.MultiReader(bytes.NewReader(data[:5]), iotest.ErrReader(errors.New("connection reset by peer"))),
+			put: func(_ context.CancelFunc, body io.Reader) error {
+				if _, err := io.Copy(io.Discard, body); err != nil {
+					return errors.New("upload failed")
+				}
+				return nil
+			},
+			wantStatus: http.StatusBadRequest,
+		},
+		{
+			name: "request cancelled",
+			body: bytes.NewReader(data),
+			put: func(cancel context.CancelFunc, _ io.Reader) error {
+				cancel()
+				return fmt.Errorf("completing upload: %w", context.Canceled)
+			},
+			wantStatus: http.StatusBadRequest,
+		},
+		{
+			name: "storage fails",
+			body: bytes.NewReader(data),
+			put: func(context.CancelFunc, io.Reader) error {
+				return errors.New("bucket unavailable")
+			},
+			wantStatus: http.StatusInternalServerError,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h, store, signer := testHandler(t)
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			h.store = &putFuncStore{Adapter: store, put: func(body io.Reader) error { return tt.put(cancel, body) }}
+
+			uri := signedURI(signer, opUpload, "/org/repo/objects/"+oid)
+			req := httptest.NewRequestWithContext(ctx, http.MethodPut, uri, tt.body)
+			req.ContentLength = int64(len(data))
+			req.SetPathValue("oid", oid)
+			w := httptest.NewRecorder()
+			h.UploadHandler(w, req)
+
+			if w.Code != tt.wantStatus {
+				t.Errorf("status = %d, want %d: %s", w.Code, tt.wantStatus, w.Body.String())
+			}
+		})
 	}
 }
 
-func TestUploadRejectsWrongContentType(t *testing.T) {
-	h, _, signer := testHandler(t)
+func TestUploadWithoutContentLength(t *testing.T) {
+	data := []byte("upload without a length")
+	oid := testutil.SHA256Hex(data)
+	tests := []struct {
+		name          string
+		maxUploadSize int64
+		want          int
+	}{
+		{"within the limit", 1 << 20, http.StatusOK},
+		{"over the limit", int64(len(data)) - 1, http.StatusRequestEntityTooLarge},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h, store, signer := testHandler(t)
+			h.maxUploadSize = tt.maxUploadSize
+			uri := signedURI(signer, opUpload, "/org/repo/objects/"+oid)
+			req := httptest.NewRequestWithContext(context.Background(), "PUT", uri, bytes.NewReader(data))
+			req.ContentLength = -1
+			req.SetPathValue("oid", oid)
+			w := httptest.NewRecorder()
+			h.UploadHandler(w, req)
 
-	oid := "deadbeef00000000000000000000000000000000000000000000000000000000"
-	uri := signedURI(signer, "/org/repo/objects/"+oid)
-	req := httptest.NewRequestWithContext(context.Background(), "PUT", uri, strings.NewReader("data"))
-	req.ContentLength = 4
-	req.Header.Set("Content-Type", "application/json")
-	req.SetPathValue("oid", oid)
-	w := httptest.NewRecorder()
-	h.UploadHandler(w, req)
+			if w.Code != tt.want {
+				t.Fatalf("status %d, want %d: %s", w.Code, tt.want, w.Body.String())
+			}
+			exists, err := store.Exists(context.Background(), "/org/repo", oid)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if exists != (tt.want == http.StatusOK) {
+				t.Errorf("object stored = %t, want %t", exists, tt.want == http.StatusOK)
+			}
+		})
+	}
+}
 
-	if w.Code != http.StatusUnsupportedMediaType {
-		t.Fatalf("expected 415, got %d", w.Code)
+func TestUploadChunkedOverHTTP(t *testing.T) {
+	h, store, signer := testHandler(t)
+	var contentLength int64
+	mux := http.NewServeMux()
+	mux.HandleFunc("PUT /org/repo/objects/{oid}", func(w http.ResponseWriter, r *http.Request) {
+		contentLength = r.ContentLength
+		h.UploadHandler(w, r)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	data := bytes.Repeat([]byte("c"), 3<<20)
+	oid := testutil.SHA256Hex(data)
+	href := signer.Sign(opUpload, srv.URL, "/org/repo/objects/"+oid).Href
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodPut, href, struct{ io.Reader }{bytes.NewReader(data)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := srv.Client().Do(req)
+	if err != nil {
+		t.Fatalf("upload: %v", err)
+	}
+	_ = resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK || contentLength != -1 {
+		t.Fatalf("status %d with request Content-Length %d, want 200 for a chunked request (-1)", resp.StatusCode, contentLength)
+	}
+	if size, err := store.Size(context.Background(), "/org/repo", oid); err != nil || size != int64(len(data)) {
+		t.Errorf("stored size = %d (%v), want %d", size, err, len(data))
+	}
+}
+
+func TestUploadAcceptsAnyContentType(t *testing.T) {
+	tests := []struct {
+		name        string
+		contentType string
+	}{
+		{"png", "image/png"},
+		{"text with charset", "text/plain; charset=utf-8"},
+		{"zip", "application/zip"},
+		{"octet-stream", "application/octet-stream"},
+		{"empty", ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h, store, signer := testHandler(t)
+
+			data := []byte("content sent as " + tt.name)
+			oid := testutil.SHA256Hex(data)
+			uri := signedURI(signer, opUpload, "/org/repo/objects/"+oid)
+			req := httptest.NewRequestWithContext(context.Background(), "PUT", uri, bytes.NewReader(data))
+			req.ContentLength = int64(len(data))
+			if tt.contentType != "" {
+				req.Header.Set("Content-Type", tt.contentType)
+			}
+			req.SetPathValue("oid", oid)
+			w := httptest.NewRecorder()
+			h.UploadHandler(w, req)
+
+			if w.Code != http.StatusOK {
+				t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+			}
+			exists, err := store.Exists(context.Background(), "/org/repo", oid)
+			if err != nil {
+				t.Fatalf("Exists: %v", err)
+			}
+			if !exists {
+				t.Fatal("object was not stored")
+			}
+		})
 	}
 }
 
 func TestUploadTooLarge(t *testing.T) {
-	dir := t.TempDir()
-	store := storage.NewLocal(dir)
-	signer, err := NewURLSigner([]byte("test-secret-key-1234567890abcdef"), 10*time.Minute)
-	if err != nil {
-		t.Fatalf("NewURLSigner: %v", err)
-	}
-	lockStore := NewFileLockStore(dir)
-	ep := &config.Endpoint{
-		Name:           "test",
-		URL:            "https://github.com/org/repo",
-		Path:           "/org/repo",
-		Visibility:     "public",
-		Authentication: "none",
-	}
-	h := NewHandler(HandlerConfig{
-		Endpoint:      ep,
-		Store:         store,
-		Auth:          &auth.None{},
-		MaxUploadSize: 10, // 10-byte limit
-		Signer:        signer,
-		LockStore:     lockStore,
-	})
+	h, _, signer := testHandler(t, func(cfg *HandlerConfig) { cfg.MaxUploadSize = 10 })
 
 	oid := "deadbeef00000000000000000000000000000000000000000000000000000000"
-	uri := signedURI(signer, "/org/repo/objects/"+oid)
+	uri := signedURI(signer, opUpload, "/org/repo/objects/"+oid)
 	req := httptest.NewRequestWithContext(context.Background(), "PUT", uri, strings.NewReader("this is way too large"))
 	req.ContentLength = 21
 	req.SetPathValue("oid", oid)
@@ -283,7 +488,7 @@ func TestDownloadNotFound(t *testing.T) {
 	h, _, signer := testHandler(t)
 
 	oid := "deadbeef00000000000000000000000000000000000000000000000000000000"
-	uri := signedURI(signer, "/org/repo/objects/"+oid)
+	uri := signedURI(signer, opDownload, "/org/repo/objects/"+oid)
 	req := httptest.NewRequestWithContext(context.Background(), "GET", uri, nil)
 	req.SetPathValue("oid", oid)
 	w := httptest.NewRecorder()
@@ -299,13 +504,13 @@ func TestVerifyHandler(t *testing.T) {
 
 	data := []byte("verify me")
 	oid := testutil.SHA256Hex(data)
-	if err := store.Put(context.Background(), h.endpoint.Path, oid, bytes.NewReader(data)); err != nil {
+	if err := store.Put(context.Background(), h.endpoint.Path, oid, bytes.NewReader(data), int64(len(data))); err != nil {
 		t.Fatalf("Put: %v", err)
 	}
 
 	// Verify success.
 	body, _ := json.Marshal(VerifyRequest{OID: oid, Size: int64(len(data))})
-	uri := signedURI(signer, "/org/repo/objects/verify")
+	uri := signedURI(signer, opVerify, "/org/repo/objects/verify")
 	req := httptest.NewRequestWithContext(context.Background(), "POST", uri, bytes.NewReader(body))
 	req.Header.Set("Content-Type", lfsMediaType)
 	w := httptest.NewRecorder()
@@ -317,7 +522,7 @@ func TestVerifyHandler(t *testing.T) {
 
 	// Verify size mismatch.
 	body, _ = json.Marshal(VerifyRequest{OID: oid, Size: 999})
-	uri = signedURI(signer, "/org/repo/objects/verify")
+	uri = signedURI(signer, opVerify, "/org/repo/objects/verify")
 	req = httptest.NewRequestWithContext(context.Background(), "POST", uri, bytes.NewReader(body))
 	req.Header.Set("Content-Type", lfsMediaType)
 	w = httptest.NewRecorder()
@@ -383,7 +588,7 @@ func TestVerifyRejectsInvalidOID(t *testing.T) {
 	h, _, signer := testHandler(t)
 
 	body, _ := json.Marshal(VerifyRequest{OID: "../../../etc/passwd", Size: 100})
-	uri := signedURI(signer, "/org/repo/objects/verify")
+	uri := signedURI(signer, opVerify, "/org/repo/objects/verify")
 	req := httptest.NewRequestWithContext(context.Background(), "POST", uri, bytes.NewReader(body))
 	req.Header.Set("Content-Type", lfsMediaType)
 	w := httptest.NewRecorder()
@@ -398,7 +603,7 @@ func TestVerifyRejectsWrongContentType(t *testing.T) {
 	h, _, signer := testHandler(t)
 
 	body, _ := json.Marshal(VerifyRequest{OID: "deadbeef00000000000000000000000000000000000000000000000000000000", Size: 100})
-	uri := signedURI(signer, "/org/repo/objects/verify")
+	uri := signedURI(signer, opVerify, "/org/repo/objects/verify")
 	req := httptest.NewRequestWithContext(context.Background(), "POST", uri, bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
@@ -469,28 +674,7 @@ func TestBatchTooLargeBody(t *testing.T) {
 }
 
 func TestBatchUploadRejectsOversizedObject(t *testing.T) {
-	dir := t.TempDir()
-	store := storage.NewLocal(dir)
-	signer, err := NewURLSigner([]byte("test-secret-key-1234567890abcdef"), 10*time.Minute)
-	if err != nil {
-		t.Fatalf("NewURLSigner: %v", err)
-	}
-	lockStore := NewFileLockStore(dir)
-	ep := &config.Endpoint{
-		Name:           "test",
-		URL:            "https://github.com/org/repo",
-		Path:           "/org/repo",
-		Visibility:     "public",
-		Authentication: "none",
-	}
-	h := NewHandler(HandlerConfig{
-		Endpoint:      ep,
-		Store:         store,
-		Auth:          &auth.None{},
-		MaxUploadSize: 1024, // 1 KiB limit
-		Signer:        signer,
-		LockStore:     lockStore,
-	})
+	h, _, _ := testHandler(t, func(cfg *HandlerConfig) { cfg.MaxUploadSize = 1024 })
 
 	body := BatchRequest{
 		Operation: "upload",
@@ -509,7 +693,7 @@ func TestBatchUploadRejectsOversizedObject(t *testing.T) {
 	}
 
 	var resp BatchResponse
-	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+	if err := json.UnmarshalRead(w.Body, &resp); err != nil {
 		t.Fatalf("decoding response: %v", err)
 	}
 	if len(resp.Objects) != 1 {
@@ -544,7 +728,7 @@ func TestBatchAcceptsZeroSizeObject(t *testing.T) {
 	}
 
 	var resp BatchResponse
-	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+	if err := json.UnmarshalRead(w.Body, &resp); err != nil {
 		t.Fatalf("decoding response: %v", err)
 	}
 	if len(resp.Objects) != 1 {
@@ -559,54 +743,90 @@ func TestBatchAcceptsZeroSizeObject(t *testing.T) {
 }
 
 func TestBatchRejectsNegativeSize(t *testing.T) {
-	h, _, _ := testHandler(t)
-
-	body := BatchRequest{
-		Operation: "download",
-		Objects:   []Object{{OID: "deadbeef00000000000000000000000000000000000000000000000000000000", Size: -1}},
-	}
-	b, _ := json.Marshal(body)
-
-	req := httptest.NewRequestWithContext(context.Background(), "POST", "/org/repo/objects/batch", bytes.NewReader(b))
-	req.Header.Set("Accept", lfsMediaType)
-	req.Header.Set("Content-Type", lfsMediaType)
-	w := httptest.NewRecorder()
-	h.BatchHandler(w, req)
-
-	if w.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d", w.Code)
+	tests := []struct {
+		name     string
+		hashAlgo string
+		wantCode int
+	}{
+		{"invalid size", "", 422},
+		{"unsupported hash algorithm", "sha1", 409},
 	}
 
-	var resp BatchResponse
-	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
-		t.Fatalf("decoding response: %v", err)
-	}
-	if len(resp.Objects) != 1 {
-		t.Fatalf("expected 1 object, got %d", len(resp.Objects))
-	}
-	if resp.Objects[0].Error == nil || resp.Objects[0].Error.Code != 422 {
-		t.Fatalf("expected per-object 422 error, got %+v", resp.Objects[0].Error)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h, _, _ := testHandler(t)
+
+			body := BatchRequest{
+				Operation: "download",
+				HashAlgo:  tt.hashAlgo,
+				Objects:   []Object{{OID: "deadbeef00000000000000000000000000000000000000000000000000000000", Size: -1}},
+			}
+			b, _ := json.Marshal(body)
+
+			req := httptest.NewRequestWithContext(context.Background(), "POST", "/org/repo/objects/batch", bytes.NewReader(b))
+			req.Header.Set("Accept", lfsMediaType)
+			req.Header.Set("Content-Type", lfsMediaType)
+			w := httptest.NewRecorder()
+			h.BatchHandler(w, req)
+
+			if w.Code != http.StatusOK {
+				t.Fatalf("expected 200, got %d", w.Code)
+			}
+
+			var resp BatchResponse
+			if err := json.UnmarshalRead(w.Body, &resp); err != nil {
+				t.Fatalf("decoding response: %v", err)
+			}
+			if len(resp.Objects) != 1 {
+				t.Fatalf("expected 1 object, got %d", len(resp.Objects))
+			}
+			if resp.Objects[0].Error == nil || resp.Objects[0].Error.Code != tt.wantCode {
+				t.Fatalf("expected per-object %d error, got %+v", tt.wantCode, resp.Objects[0].Error)
+			}
+			if resp.Objects[0].Size != 0 {
+				t.Errorf("expected size 0, got %d", resp.Objects[0].Size)
+			}
+		})
 	}
 }
 
 func TestBatchRejectsUnsupportedHashAlgo(t *testing.T) {
-	h, _, _ := testHandler(t)
-
 	body := BatchRequest{
-		Operation: "download",
+		Operation: "upload",
 		HashAlgo:  "sha1",
-		Objects:   []Object{{OID: "deadbeef00000000000000000000000000000000000000000000000000000000", Size: 100}},
+		Objects:   []Object{{OID: fmt.Sprintf("%064x", 1), Size: 100}, {OID: fmt.Sprintf("%064x", 2), Size: 200}},
 	}
 	b, _ := json.Marshal(body)
+	send := func(h *Handler) *httptest.ResponseRecorder {
+		req := httptest.NewRequestWithContext(context.Background(), "POST", "/org/repo/objects/batch", bytes.NewReader(b))
+		req.Header.Set("Accept", lfsMediaType)
+		req.Header.Set("Content-Type", lfsMediaType)
+		w := httptest.NewRecorder()
+		h.BatchHandler(w, req)
+		return w
+	}
 
-	req := httptest.NewRequestWithContext(context.Background(), "POST", "/org/repo/objects/batch", bytes.NewReader(b))
-	req.Header.Set("Accept", lfsMediaType)
-	req.Header.Set("Content-Type", lfsMediaType)
-	w := httptest.NewRecorder()
-	h.BatchHandler(w, req)
+	h, _, _ := testHandler(t)
+	w := send(h)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var resp BatchResponse
+	if err := json.UnmarshalRead(w.Body, &resp); err != nil {
+		t.Fatal(err)
+	}
+	if len(resp.Objects) != 2 || resp.HashAlgo != "sha256" {
+		t.Fatalf("got %d objects with hash_algo %q, want 2 with sha256", len(resp.Objects), resp.HashAlgo)
+	}
+	for _, obj := range resp.Objects {
+		if obj.Error == nil || obj.Error.Code != http.StatusConflict || obj.Actions != nil {
+			t.Errorf("object %s: error %+v, actions %v; want a 409 error and no actions", obj.OID, obj.Error, obj.Actions)
+		}
+	}
 
-	if w.Code != http.StatusConflict {
-		t.Fatalf("expected 409, got %d", w.Code)
+	h.auth = noCredentialsAuth{}
+	if w := send(h); w.Code != http.StatusUnauthorized {
+		t.Errorf("without credentials: expected 401, got %d", w.Code)
 	}
 }
 
@@ -651,7 +871,7 @@ func TestCreateLockAndList(t *testing.T) {
 	}
 
 	var createResp CreateLockResponse
-	if err := json.NewDecoder(w.Body).Decode(&createResp); err != nil {
+	if err := json.UnmarshalRead(w.Body, &createResp); err != nil {
 		t.Fatalf("decoding response: %v", err)
 	}
 	if createResp.Lock.Path != "path/to/file.dat" {
@@ -672,7 +892,7 @@ func TestCreateLockAndList(t *testing.T) {
 	}
 
 	var listResp ListLocksResponse
-	if err := json.NewDecoder(lw.Body).Decode(&listResp); err != nil {
+	if err := json.UnmarshalRead(lw.Body, &listResp); err != nil {
 		t.Fatalf("decoding response: %v", err)
 	}
 	if len(listResp.Locks) != 1 {
@@ -723,7 +943,7 @@ func TestUnlockHandler(t *testing.T) {
 		t.Fatalf("expected 201, got %d", w.Code)
 	}
 	var createResp CreateLockResponse
-	_ = json.NewDecoder(w.Body).Decode(&createResp)
+	_ = json.UnmarshalRead(w.Body, &createResp)
 
 	// Unlock it.
 	unlockBody, _ := json.Marshal(UnlockRequest{})
@@ -743,9 +963,64 @@ func TestUnlockHandler(t *testing.T) {
 	lw := httptest.NewRecorder()
 	h.ListLocksHandler(lw, listReq)
 	var listResp ListLocksResponse
-	_ = json.NewDecoder(lw.Body).Decode(&listResp)
+	_ = json.UnmarshalRead(lw.Body, &listResp)
 	if len(listResp.Locks) != 0 {
 		t.Fatalf("expected 0 locks after unlock, got %d", len(listResp.Locks))
+	}
+}
+
+// userAuth is an authenticator that authorises every request as user, as a maintainer when maintainer is set.
+type userAuth struct {
+	user       string
+	maintainer bool
+}
+
+func (a *userAuth) Authenticate(_ context.Context, _ *config.Endpoint, _, _ string, _ auth.Operation) (auth.Result, error) {
+	return auth.Result{Authenticated: true, Authorized: true, Username: a.user, Maintainer: a.maintainer}, nil
+}
+
+func TestUnlockForceRequiresMaintainer(t *testing.T) {
+	tests := []struct {
+		name       string
+		requester  string
+		maintainer bool
+		wantStatus int
+	}{
+		{"maintainer forces another user's lock", "bob", true, http.StatusOK},
+		{"pusher cannot force another user's lock", "bob", false, http.StatusForbidden},
+		{"pusher forces their own lock", "alice", false, http.StatusOK},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h, _, _ := testHandler(t)
+			lock, err := h.lockStore.Create(context.Background(), h.endpoint.Path, "file.txt", "alice")
+			if err != nil {
+				t.Fatal(err)
+			}
+			h.auth = &userAuth{user: tt.requester, maintainer: tt.maintainer}
+
+			body, _ := json.Marshal(UnlockRequest{Force: true})
+			req := httptest.NewRequestWithContext(context.Background(), "POST", "/org/repo/locks/"+lock.ID+"/unlock", bytes.NewReader(body))
+			req.Header.Set("Accept", lfsMediaType)
+			req.Header.Set("Content-Type", lfsMediaType)
+			req.SetPathValue("id", lock.ID)
+			w := httptest.NewRecorder()
+			h.UnlockHandler(w, req)
+
+			if w.Code != tt.wantStatus {
+				t.Fatalf("status %d, want %d: %s", w.Code, tt.wantStatus, w.Body.String())
+			}
+			if tt.wantStatus == http.StatusForbidden && !strings.Contains(w.Body.String(), "maintain or admin") {
+				t.Errorf("error does not name the required permission: %s", w.Body.String())
+			}
+			remaining, _, err := h.lockStore.List(context.Background(), h.endpoint.Path, ListLocksOptions{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if released := len(remaining) == 0; released != (tt.wantStatus == http.StatusOK) {
+				t.Errorf("lock released = %t, want %t", released, tt.wantStatus == http.StatusOK)
+			}
+		})
 	}
 }
 
@@ -763,7 +1038,7 @@ func TestVerifyLocksHandler(t *testing.T) {
 		t.Fatalf("expected 201, got %d", w.Code)
 	}
 
-	// Verify locks — should appear in "ours" since same user.
+	// Verifying as the lock's owner lists the lock under "ours".
 	verifyBody, _ := json.Marshal(VerifyLocksRequest{})
 	verifyReq := httptest.NewRequestWithContext(context.Background(), "POST", "/org/repo/locks/verify", bytes.NewReader(verifyBody))
 	verifyReq.Header.Set("Accept", lfsMediaType)
@@ -774,7 +1049,7 @@ func TestVerifyLocksHandler(t *testing.T) {
 		t.Fatalf("expected 200, got %d: %s", vw.Code, vw.Body.String())
 	}
 	var verifyResp VerifyLocksResponse
-	_ = json.NewDecoder(vw.Body).Decode(&verifyResp)
+	_ = json.UnmarshalRead(vw.Body, &verifyResp)
 	if len(verifyResp.Ours) != 1 {
 		t.Fatalf("expected 1 lock in ours, got %d", len(verifyResp.Ours))
 	}
@@ -790,7 +1065,7 @@ func TestErrorResponseIncludesRequestID(t *testing.T) {
 	req.Header.Set("Accept", lfsMediaType)
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
-	h.BatchHandler(w, req)
+	middleware.RequestID(http.HandlerFunc(h.BatchHandler)).ServeHTTP(w, req)
 
 	rid := w.Header().Get("X-Request-ID")
 	if rid == "" {
@@ -798,7 +1073,7 @@ func TestErrorResponseIncludesRequestID(t *testing.T) {
 	}
 
 	var resp ErrorResponse
-	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+	if err := json.UnmarshalRead(w.Body, &resp); err != nil {
 		t.Fatalf("decoding error response: %v", err)
 	}
 	if resp.RequestID != rid {
@@ -820,32 +1095,63 @@ func TestDownloadRejectsUnsignedURL(t *testing.T) {
 	}
 }
 
+func TestTransferURLsAreBoundToOperationAndHost(t *testing.T) {
+	content := []byte("bound object")
+	oid := testutil.SHA256Hex(content)
+	path := "/org/repo/objects/" + oid
+
+	tests := []struct {
+		name          string
+		baseURL       string
+		signedFor     string
+		method        string
+		forwardedHost string
+		want          int
+	}{
+		{"download URL downloads", "", opDownload, http.MethodGet, "", http.StatusOK},
+		{"download URL cannot upload", "", opDownload, http.MethodPut, "", http.StatusForbidden},
+		{"upload URL cannot download", "", opUpload, http.MethodGet, "", http.StatusForbidden},
+		{"download URL at another host", "", opDownload, http.MethodGet, "evil.example.com", http.StatusForbidden},
+		{"base_url ignores the request host", "https://lfs.example.com", opDownload, http.MethodGet, "evil.example.com", http.StatusOK},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h, store, signer := testHandler(t)
+			h.baseURL = tt.baseURL
+			if err := store.Put(context.Background(), "/org/repo", oid, bytes.NewReader(content), int64(len(content))); err != nil {
+				t.Fatal(err)
+			}
+
+			signedBase := cmp.Or(tt.baseURL, testBaseURL)
+			uri := strings.TrimPrefix(signer.Sign(tt.signedFor, signedBase, path).Href, signedBase)
+			req := httptest.NewRequestWithContext(context.Background(), tt.method, uri, bytes.NewReader(content))
+			req.SetPathValue("oid", oid)
+			if tt.forwardedHost != "" {
+				req.Header.Set("X-Forwarded-Host", tt.forwardedHost)
+			}
+			w := httptest.NewRecorder()
+			if tt.method == http.MethodPut {
+				h.UploadHandler(w, req)
+			} else {
+				h.DownloadHandler(w, req)
+			}
+
+			if w.Code != tt.want {
+				t.Errorf("%s with a URL signed for %s: status %d, want %d", tt.method, tt.signedFor, w.Code, tt.want)
+			}
+		})
+	}
+}
+
 func TestUploadRejectsExpiredURL(t *testing.T) {
-	dir := t.TempDir()
-	store := storage.NewLocal(dir)
 	expiredSigner, err := NewURLSigner([]byte("test-secret-key-1234567890abcdef"), -1*time.Second)
 	if err != nil {
 		t.Fatalf("NewURLSigner: %v", err)
 	}
-	lockStore := NewFileLockStore(dir)
-	ep := &config.Endpoint{
-		Name:           "test",
-		URL:            "https://github.com/org/repo",
-		Path:           "/org/repo",
-		Visibility:     "public",
-		Authentication: "none",
-	}
-	h := NewHandler(HandlerConfig{
-		Endpoint:      ep,
-		Store:         store,
-		Auth:          &auth.None{},
-		MaxUploadSize: 5 << 30,
-		Signer:        expiredSigner,
-		LockStore:     lockStore,
-	})
+	h, _, _ := testHandler(t, func(cfg *HandlerConfig) { cfg.Signer = expiredSigner })
 
 	oid := "deadbeef00000000000000000000000000000000000000000000000000000000"
-	uri := signedURI(expiredSigner, "/org/repo/objects/"+oid)
+	uri := signedURI(expiredSigner, opUpload, "/org/repo/objects/"+oid)
 	req := httptest.NewRequestWithContext(context.Background(), "PUT", uri, strings.NewReader("data"))
 	req.ContentLength = 4
 	req.SetPathValue("oid", oid)
@@ -934,30 +1240,162 @@ func (s *spaceAwareStore) AvailableSpace(_ context.Context) (uint64, error) {
 	return s.avail, s.availErr
 }
 
+// deniedAuth is an authenticator that accepts every credential but authorises nothing.
+type deniedAuth struct{}
+
+func (a *deniedAuth) Authenticate(_ context.Context, _ *config.Endpoint, _, _ string, _ auth.Operation) (auth.Result, error) {
+	return auth.Result{Authenticated: true, Username: "carol"}, nil
+}
+
+func TestDeniedAccessStatus(t *testing.T) {
+	batch := func(operation string) string {
+		b, _ := json.Marshal(BatchRequest{Operation: operation, Objects: []Object{{OID: strings.Repeat("a", 64), Size: 1}}})
+		return string(b)
+	}
+	tests := []struct {
+		name       string
+		method     string
+		path       string
+		body       string
+		handler    func(*Handler) http.HandlerFunc
+		wantStatus int
+		wantMsg    string
+	}{
+		{"batch download", "POST", "/org/repo/objects/batch", batch("download"), func(h *Handler) http.HandlerFunc { return h.BatchHandler }, http.StatusNotFound, "repository not found"},
+		{"batch upload", "POST", "/org/repo/objects/batch", batch("upload"), func(h *Handler) http.HandlerFunc { return h.BatchHandler }, http.StatusForbidden, "insufficient permissions"},
+		{"list locks", "GET", "/org/repo/locks", "", func(h *Handler) http.HandlerFunc { return h.ListLocksHandler }, http.StatusForbidden, "insufficient permissions"},
+		{"create lock", "POST", "/org/repo/locks", `{"path":"a.bin"}`, func(h *Handler) http.HandlerFunc { return h.CreateLockHandler }, http.StatusForbidden, "insufficient permissions"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h, _, _ := testHandler(t)
+			h.auth = &deniedAuth{}
+
+			req := httptest.NewRequestWithContext(context.Background(), tt.method, tt.path, strings.NewReader(tt.body))
+			req.Header.Set("Accept", lfsMediaType)
+			req.Header.Set("Content-Type", lfsMediaType)
+			w := httptest.NewRecorder()
+			tt.handler(h)(w, req)
+
+			if w.Code != tt.wantStatus || !strings.Contains(w.Body.String(), tt.wantMsg) {
+				t.Fatalf("got %d %s, want %d %q", w.Code, w.Body.String(), tt.wantStatus, tt.wantMsg)
+			}
+		})
+	}
+}
+
+// failingAuth is an authenticator that always returns err.
+type failingAuth struct {
+	err error
+}
+
+func (a *failingAuth) Authenticate(_ context.Context, _ *config.Endpoint, _, _ string, _ auth.Operation) (auth.Result, error) {
+	return auth.Result{}, a.err
+}
+
+func TestBatchAuthenticationErrors(t *testing.T) {
+	tests := []struct {
+		name           string
+		err            error
+		wantStatus     int
+		wantRetryAfter string
+	}{
+		{name: "rate limited", err: &auth.RateLimitedError{RetryAfter: 1500 * time.Millisecond}, wantStatus: http.StatusTooManyRequests, wantRetryAfter: "2"},
+		{name: "provider unavailable", err: fmt.Errorf("%w: connection refused", auth.ErrUnavailable), wantStatus: http.StatusBadGateway},
+		{name: "unexpected error", err: errors.New("boom"), wantStatus: http.StatusInternalServerError},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h, _, _ := testHandler(t)
+			h.auth = &failingAuth{err: tt.err}
+
+			b, _ := json.Marshal(BatchRequest{Operation: "download", Objects: []Object{{OID: strings.Repeat("a", 64), Size: 1}}})
+			req := httptest.NewRequestWithContext(context.Background(), "POST", "/org/repo/objects/batch", bytes.NewReader(b))
+			req.Header.Set("Accept", lfsMediaType)
+			req.Header.Set("Content-Type", lfsMediaType)
+			w := httptest.NewRecorder()
+			h.BatchHandler(w, req)
+
+			if w.Code != tt.wantStatus {
+				t.Fatalf("status = %d, want %d: %s", w.Code, tt.wantStatus, w.Body.String())
+			}
+			if got := w.Header().Get("Retry-After"); got != tt.wantRetryAfter {
+				t.Errorf("Retry-After = %q, want %q", got, tt.wantRetryAfter)
+			}
+		})
+	}
+}
+
+// presigningStore wraps a real storage adapter with presigned URLs that refuse objects larger than maxSize.
+type presigningStore struct {
+	storage.Adapter
+	maxSize int64
+}
+
+func (s *presigningStore) PresignGet(_ context.Context, _, oid string, _ time.Duration) (string, error) {
+	return "https://storage.example/" + oid, nil
+}
+
+func (s *presigningStore) PresignPut(_ context.Context, _, oid string, size int64, _ time.Duration) (string, map[string]string, error) {
+	if size > s.maxSize {
+		return "", nil, storage.ErrObjectTooLarge
+	}
+	return "https://storage.example/" + oid, map[string]string{"X-Amz-Checksum-Sha256": "checksum-" + oid}, nil
+}
+
+func TestBatchUploadPresigned(t *testing.T) {
+	oid := "deadbeef00000000000000000000000000000000000000000000000000000000"
+	tests := []struct {
+		name       string
+		size       int64
+		wantHeader map[string]string
+		wantError  int
+	}{
+		{name: "headers forwarded", size: 100, wantHeader: map[string]string{"X-Amz-Checksum-Sha256": "checksum-" + oid}},
+		{name: "too large to presign", size: 101, wantError: http.StatusUnprocessableEntity},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h, local, _ := testHandler(t)
+			h.store = &presigningStore{Adapter: local, maxSize: 100}
+
+			b, _ := json.Marshal(BatchRequest{Operation: "upload", Objects: []Object{{OID: oid, Size: tt.size}}})
+			req := httptest.NewRequestWithContext(context.Background(), "POST", "/org/repo/objects/batch", bytes.NewReader(b))
+			req.Header.Set("Accept", lfsMediaType)
+			req.Header.Set("Content-Type", lfsMediaType)
+			w := httptest.NewRecorder()
+			h.BatchHandler(w, req)
+
+			if w.Code != http.StatusOK {
+				t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+			}
+			var resp BatchResponse
+			if err := json.UnmarshalRead(w.Body, &resp); err != nil {
+				t.Fatalf("decoding response: %v", err)
+			}
+			obj := resp.Objects[0]
+			if tt.wantError != 0 {
+				if obj.Error == nil || obj.Error.Code != tt.wantError {
+					t.Fatalf("object error = %+v, want code %d", obj.Error, tt.wantError)
+				}
+				return
+			}
+			upload, ok := obj.Actions["upload"]
+			if !ok {
+				t.Fatalf("expected upload action, got %+v", obj)
+			}
+			if !maps.Equal(upload.Header, tt.wantHeader) {
+				t.Errorf("upload header = %v, want %v", upload.Header, tt.wantHeader)
+			}
+			if _, ok := obj.Actions["verify"]; !ok {
+				t.Error("expected verify action")
+			}
+		})
+	}
+}
+
 func TestBatchUploadInsufficientStorage(t *testing.T) {
-	dir := t.TempDir()
-	realStore := storage.NewLocal(dir)
-	store := &spaceAwareStore{Adapter: realStore, avail: 100} // Only 100 bytes available.
-	signer, err := NewURLSigner([]byte("test-secret-key-1234567890abcdef"), 10*time.Minute)
-	if err != nil {
-		t.Fatalf("NewURLSigner: %v", err)
-	}
-	lockStore := NewFileLockStore(dir)
-	ep := &config.Endpoint{
-		Name:           "test",
-		URL:            "https://github.com/org/repo",
-		Path:           "/org/repo",
-		Visibility:     "public",
-		Authentication: "none",
-	}
-	h := NewHandler(HandlerConfig{
-		Endpoint:      ep,
-		Store:         store,
-		Auth:          &auth.None{},
-		MaxUploadSize: 5 << 30,
-		Signer:        signer,
-		LockStore:     lockStore,
-	})
+	h, _, _ := testHandler(t, func(cfg *HandlerConfig) { cfg.Store = &spaceAwareStore{Adapter: cfg.Store, avail: 100} })
 
 	body := BatchRequest{
 		Operation: "upload",
@@ -979,29 +1417,7 @@ func TestBatchUploadInsufficientStorage(t *testing.T) {
 }
 
 func TestBatchUploadSufficientStorage(t *testing.T) {
-	dir := t.TempDir()
-	realStore := storage.NewLocal(dir)
-	store := &spaceAwareStore{Adapter: realStore, avail: 1000}
-	signer, err := NewURLSigner([]byte("test-secret-key-1234567890abcdef"), 10*time.Minute)
-	if err != nil {
-		t.Fatalf("NewURLSigner: %v", err)
-	}
-	lockStore := NewFileLockStore(dir)
-	ep := &config.Endpoint{
-		Name:           "test",
-		URL:            "https://github.com/org/repo",
-		Path:           "/org/repo",
-		Visibility:     "public",
-		Authentication: "none",
-	}
-	h := NewHandler(HandlerConfig{
-		Endpoint:      ep,
-		Store:         store,
-		Auth:          &auth.None{},
-		MaxUploadSize: 5 << 30,
-		Signer:        signer,
-		LockStore:     lockStore,
-	})
+	h, _, _ := testHandler(t, func(cfg *HandlerConfig) { cfg.Store = &spaceAwareStore{Adapter: cfg.Store, avail: 1000} })
 
 	body := BatchRequest{
 		Operation: "upload",
@@ -1022,29 +1438,53 @@ func TestBatchUploadSufficientStorage(t *testing.T) {
 	}
 }
 
+func TestBatchUploadSpaceCountsOnlyMissingObjects(t *testing.T) {
+	stored := bytes.Repeat([]byte("s"), 1000)
+	storedOID := testutil.SHA256Hex(stored)
+	missing := func(i int) string { return testutil.SHA256Hex(fmt.Appendf(nil, "missing %d", i)) }
+
+	tests := []struct {
+		name    string
+		objects []Object
+		avail   uint64
+		want    int
+	}{
+		{"stored objects need no space", []Object{{OID: storedOID, Size: 1000}}, 1, http.StatusOK},
+		{"stored objects are not counted", []Object{{OID: storedOID, Size: 1000}, {OID: missing(0), Size: 50}}, 100, http.StatusOK},
+		{"missing objects need more than is free", []Object{{OID: storedOID, Size: 1000}, {OID: missing(0), Size: 150}}, 100, http.StatusInsufficientStorage},
+		{
+			"sizes that would wrap the sum",
+			[]Object{{OID: missing(0), Size: math.MaxInt64}, {OID: missing(1), Size: math.MaxInt64}, {OID: missing(2), Size: math.MaxInt64}},
+			math.MaxUint64 - 1,
+			http.StatusInsufficientStorage,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h, local, _ := testHandler(t)
+			if err := local.Put(context.Background(), "/org/repo", storedOID, bytes.NewReader(stored), int64(len(stored))); err != nil {
+				t.Fatal(err)
+			}
+			h.store = &spaceAwareStore{Adapter: local, avail: tt.avail}
+			h.maxUploadSize = math.MaxInt64
+
+			b, _ := json.Marshal(BatchRequest{Operation: opUpload, Objects: tt.objects})
+			req := httptest.NewRequestWithContext(context.Background(), "POST", "/org/repo/objects/batch", bytes.NewReader(b))
+			req.Header.Set("Accept", lfsMediaType)
+			req.Header.Set("Content-Type", lfsMediaType)
+			w := httptest.NewRecorder()
+			h.BatchHandler(w, req)
+
+			if w.Code != tt.want {
+				t.Fatalf("status %d, want %d: %s", w.Code, tt.want, w.Body.String())
+			}
+		})
+	}
+}
+
 func TestBatchUploadSpaceCheckFailsOpen(t *testing.T) {
-	dir := t.TempDir()
-	realStore := storage.NewLocal(dir)
-	store := &spaceAwareStore{Adapter: realStore, availErr: errors.New("statfs failed")}
-	signer, err := NewURLSigner([]byte("test-secret-key-1234567890abcdef"), 10*time.Minute)
-	if err != nil {
-		t.Fatalf("NewURLSigner: %v", err)
-	}
-	lockStore := NewFileLockStore(dir)
-	ep := &config.Endpoint{
-		Name:           "test",
-		URL:            "https://github.com/org/repo",
-		Path:           "/org/repo",
-		Visibility:     "public",
-		Authentication: "none",
-	}
-	h := NewHandler(HandlerConfig{
-		Endpoint:      ep,
-		Store:         store,
-		Auth:          &auth.None{},
-		MaxUploadSize: 5 << 30,
-		Signer:        signer,
-		LockStore:     lockStore,
+	h, _, _ := testHandler(t, func(cfg *HandlerConfig) {
+		cfg.Store = &spaceAwareStore{Adapter: cfg.Store, availErr: errors.New("statfs failed")}
 	})
 
 	body := BatchRequest{
@@ -1073,7 +1513,7 @@ func TestBatchMixedSuccessAndFailure(t *testing.T) {
 	// Upload one object so it exists on disk.
 	existingData := []byte("existing object data")
 	existingOID := testutil.SHA256Hex(existingData)
-	if err := store.Put(context.Background(), h.endpoint.Path, existingOID, bytes.NewReader(existingData)); err != nil {
+	if err := store.Put(context.Background(), h.endpoint.Path, existingOID, bytes.NewReader(existingData), int64(len(existingData))); err != nil {
 		t.Fatalf("Put: %v", err)
 	}
 
@@ -1102,14 +1542,14 @@ func TestBatchMixedSuccessAndFailure(t *testing.T) {
 	}
 
 	var resp BatchResponse
-	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+	if err := json.UnmarshalRead(w.Body, &resp); err != nil {
 		t.Fatalf("decoding response: %v", err)
 	}
 	if len(resp.Objects) != 4 {
 		t.Fatalf("expected 4 objects, got %d", len(resp.Objects))
 	}
 
-	// First object: success — should have download action.
+	// First object succeeds with a download action.
 	if resp.Objects[0].Error != nil {
 		t.Errorf("object 0: unexpected error %+v", resp.Objects[0].Error)
 	}
@@ -1139,7 +1579,7 @@ func TestBatchUploadMixedNewAndExisting(t *testing.T) {
 	// Upload one object so it exists.
 	existingData := []byte("already here")
 	existingOID := testutil.SHA256Hex(existingData)
-	if err := store.Put(context.Background(), h.endpoint.Path, existingOID, bytes.NewReader(existingData)); err != nil {
+	if err := store.Put(context.Background(), h.endpoint.Path, existingOID, bytes.NewReader(existingData), int64(len(existingData))); err != nil {
 		t.Fatalf("Put: %v", err)
 	}
 
@@ -1165,7 +1605,7 @@ func TestBatchUploadMixedNewAndExisting(t *testing.T) {
 	}
 
 	var resp BatchResponse
-	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+	if err := json.UnmarshalRead(w.Body, &resp); err != nil {
 		t.Fatalf("decoding response: %v", err)
 	}
 	if len(resp.Objects) != 2 {
@@ -1200,7 +1640,7 @@ func TestConcurrentUploads(t *testing.T) {
 
 	for range goroutines {
 		go func() {
-			uri := signedURI(signer, "/org/repo/objects/"+oid)
+			uri := signedURI(signer, opUpload, "/org/repo/objects/"+oid)
 			req := httptest.NewRequestWithContext(context.Background(), "PUT", uri, bytes.NewReader(data))
 			req.ContentLength = int64(len(data))
 			req.SetPathValue("oid", oid)
@@ -1218,7 +1658,7 @@ func TestConcurrentUploads(t *testing.T) {
 	}
 
 	// Verify the object is readable after concurrent uploads.
-	downloadURI := signedURI(signer, "/org/repo/objects/"+oid)
+	downloadURI := signedURI(signer, opDownload, "/org/repo/objects/"+oid)
 	downloadReq := httptest.NewRequestWithContext(context.Background(), "GET", downloadURI, nil)
 	downloadReq.SetPathValue("oid", oid)
 	dw := httptest.NewRecorder()
@@ -1239,7 +1679,7 @@ func TestUploadIdempotent(t *testing.T) {
 	oid := testutil.SHA256Hex(data)
 
 	// First upload.
-	uri := signedURI(signer, "/org/repo/objects/"+oid)
+	uri := signedURI(signer, opUpload, "/org/repo/objects/"+oid)
 	req := httptest.NewRequestWithContext(context.Background(), "PUT", uri, bytes.NewReader(data))
 	req.ContentLength = int64(len(data))
 	req.SetPathValue("oid", oid)
@@ -1249,8 +1689,8 @@ func TestUploadIdempotent(t *testing.T) {
 		t.Fatalf("first upload: expected 200, got %d", w.Code)
 	}
 
-	// Second upload of the same object — should succeed (idempotent).
-	uri = signedURI(signer, "/org/repo/objects/"+oid)
+	// A second upload of the same object succeeds.
+	uri = signedURI(signer, opUpload, "/org/repo/objects/"+oid)
 	req = httptest.NewRequestWithContext(context.Background(), "PUT", uri, bytes.NewReader(data))
 	req.ContentLength = int64(len(data))
 	req.SetPathValue("oid", oid)
@@ -1262,33 +1702,31 @@ func TestUploadIdempotent(t *testing.T) {
 }
 
 func TestDownloadInvalidOID(t *testing.T) {
-	h, _, signer := testHandler(t)
+	h, _, _ := testHandler(t)
 
 	badOID := "not-valid"
-	uri := signedURI(signer, "/org/repo/objects/"+badOID)
-	req := httptest.NewRequestWithContext(context.Background(), "GET", uri, nil)
+	req := httptest.NewRequestWithContext(context.Background(), "GET", "/org/repo/objects/"+badOID, nil)
 	req.SetPathValue("oid", badOID)
 	w := httptest.NewRecorder()
 	h.DownloadHandler(w, req)
 
-	if w.Code != http.StatusUnprocessableEntity {
-		t.Fatalf("expected 422, got %d", w.Code)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d", w.Code)
 	}
 }
 
 func TestUploadInvalidOID(t *testing.T) {
-	h, _, signer := testHandler(t)
+	h, _, _ := testHandler(t)
 
 	badOID := "zzzz"
-	uri := signedURI(signer, "/org/repo/objects/"+badOID)
-	req := httptest.NewRequestWithContext(context.Background(), "PUT", uri, strings.NewReader("data"))
+	req := httptest.NewRequestWithContext(context.Background(), "PUT", "/org/repo/objects/"+badOID, strings.NewReader("data"))
 	req.ContentLength = 4
 	req.SetPathValue("oid", badOID)
 	w := httptest.NewRecorder()
 	h.UploadHandler(w, req)
 
-	if w.Code != http.StatusUnprocessableEntity {
-		t.Fatalf("expected 422, got %d", w.Code)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d", w.Code)
 	}
 }
 
@@ -1297,7 +1735,7 @@ func TestVerifyNotFound(t *testing.T) {
 
 	oid := "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
 	body, _ := json.Marshal(VerifyRequest{OID: oid, Size: 100})
-	uri := signedURI(signer, "/org/repo/objects/verify")
+	uri := signedURI(signer, opVerify, "/org/repo/objects/verify")
 	req := httptest.NewRequestWithContext(context.Background(), "POST", uri, bytes.NewReader(body))
 	req.Header.Set("Content-Type", lfsMediaType)
 	w := httptest.NewRecorder()
@@ -1325,7 +1763,7 @@ func TestBatchInvalidJSON(t *testing.T) {
 func TestVerifyInvalidJSON(t *testing.T) {
 	h, _, signer := testHandler(t)
 
-	uri := signedURI(signer, "/org/repo/objects/verify")
+	uri := signedURI(signer, opVerify, "/org/repo/objects/verify")
 	req := httptest.NewRequestWithContext(context.Background(), "POST", uri, strings.NewReader("not json"))
 	req.Header.Set("Content-Type", lfsMediaType)
 	w := httptest.NewRecorder()
@@ -1423,6 +1861,15 @@ func TestIsValidLockPath(t *testing.T) {
 		{"../traversal", false},
 		{"a/../b", false},
 		{"path\x00evil", false},
+		{`a\b`, true},
+		{`C:\x`, true},
+		{"CON", true},
+		{"nul.txt", true},
+		{"trailing space ", true},
+		{"dir/", false},
+		{"a//b", false},
+		{"./rel", false},
+		{"invalid\xffutf8", false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.path, func(t *testing.T) {
@@ -1450,7 +1897,118 @@ func TestBatchRejectsTooManyObjects(t *testing.T) {
 
 	h.BatchHandler(w, req)
 
-	if w.Code != http.StatusUnprocessableEntity {
-		t.Fatalf("expected 422, got %d", w.Code)
+	if w.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("expected 413, got %d", w.Code)
+	}
+}
+
+func TestAcceptsLFSMediaType(t *testing.T) {
+	tests := []struct {
+		accept string
+		want   bool
+	}{
+		{lfsMediaType, true},
+		{lfsMediaType + "; charset=utf-8", true},
+		{lfsMediaType + ", */*", true},
+		{"application/json, " + lfsMediaType, true},
+		{"application/*", true},
+		{"*/*", true},
+		{"", false},
+		{"application/json", false},
+		{"text/html, " + lfsMediaType + ";q=0", false},
+		{lfsMediaType + ";q=0.0, text/html", false},
+		{"not a media type", false},
+	}
+	for _, tt := range tests {
+		if got := acceptsLFSMediaType(tt.accept); got != tt.want {
+			t.Errorf("acceptsLFSMediaType(%q) = %t, want %t", tt.accept, got, tt.want)
+		}
+	}
+}
+
+func TestBatchAcceptsAcceptList(t *testing.T) {
+	h, _, _ := testHandler(t)
+	b, _ := json.Marshal(BatchRequest{Operation: opDownload, Objects: []Object{{OID: fmt.Sprintf("%064x", 1), Size: 1}}})
+	req := httptest.NewRequestWithContext(context.Background(), "POST", "/org/repo/objects/batch", bytes.NewReader(b))
+	req.Header.Set("Accept", lfsMediaType+", */*")
+	req.Header.Set("Content-Type", lfsMediaType)
+	w := httptest.NewRecorder()
+
+	h.BatchHandler(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestBatchUploadRejectsStoredObjectOfAnotherSize(t *testing.T) {
+	h, store, _ := testHandler(t)
+	content := []byte("stored content")
+	oid := testutil.SHA256Hex(content)
+	if err := store.Put(context.Background(), "/org/repo", oid, bytes.NewReader(content), int64(len(content))); err != nil {
+		t.Fatal(err)
+	}
+	objects := []Object{{OID: oid, Size: int64(len(content)) + 1}, {OID: oid, Size: int64(len(content))}}
+	r := httptest.NewRequestWithContext(context.Background(), "POST", "/org/repo/objects/batch", nil)
+
+	resp := h.processBatch(r, &BatchRequest{Operation: opUpload, Objects: objects}, "http://test")
+
+	if got := resp.Objects[0].Error; got == nil || got.Code != http.StatusUnprocessableEntity {
+		t.Errorf("wrong declared size: error = %+v, want a 422", got)
+	}
+	if got := resp.Objects[1]; got.Error != nil || got.Actions != nil {
+		t.Errorf("matching declared size: error = %+v, actions = %v, want neither", got.Error, got.Actions)
+	}
+}
+
+// noCredentialsAuth is an authenticator that treats every request as carrying no valid credentials.
+type noCredentialsAuth struct{}
+
+func (noCredentialsAuth) Authenticate(_ context.Context, _ *config.Endpoint, _, _ string, _ auth.Operation) (auth.Result, error) {
+	return auth.Result{}, nil
+}
+
+func TestLockListingsRejectInvalidCursors(t *testing.T) {
+	h, _, _ := testHandler(t)
+
+	listReq := httptest.NewRequestWithContext(context.Background(), "GET", "/org/repo/locks?cursor=not-a-cursor", nil)
+	listReq.Header.Set("Accept", lfsMediaType)
+	lw := httptest.NewRecorder()
+	h.ListLocksHandler(lw, listReq)
+
+	body, _ := json.Marshal(VerifyLocksRequest{Cursor: "not-a-cursor"})
+	verifyReq := httptest.NewRequestWithContext(context.Background(), "POST", "/org/repo/locks/verify", bytes.NewReader(body))
+	verifyReq.Header.Set("Accept", lfsMediaType)
+	verifyReq.Header.Set("Content-Type", lfsMediaType)
+	vw := httptest.NewRecorder()
+	h.VerifyLocksHandler(vw, verifyReq)
+
+	if lw.Code != http.StatusUnprocessableEntity || vw.Code != http.StatusUnprocessableEntity {
+		t.Errorf("list status %d, verify status %d; want 422 for both", lw.Code, vw.Code)
+	}
+}
+
+func TestLockHandlersAuthenticateBeforeCheckingTheRequest(t *testing.T) {
+	h, _, _ := testHandler(t)
+	h.auth = noCredentialsAuth{}
+
+	handlers := map[string]http.HandlerFunc{
+		"create": h.CreateLockHandler,
+		"list":   h.ListLocksHandler,
+		"verify": h.VerifyLocksHandler,
+		"unlock": h.UnlockHandler,
+	}
+	for name, handler := range handlers {
+		t.Run(name, func(t *testing.T) {
+			req := httptest.NewRequestWithContext(context.Background(), "POST", "/org/repo/locks", strings.NewReader("not json"))
+			req.Header.Set("Accept", "text/html")
+			w := httptest.NewRecorder()
+
+			handler(w, req)
+
+			if w.Code != http.StatusUnauthorized {
+				t.Errorf("expected 401, got %d", w.Code)
+			}
+		})
 	}
 }

@@ -51,47 +51,40 @@ type SignedURL struct {
 	ExpiresAt string
 }
 
-// Sign returns a signed URL with expiration query parameters appended.
-// The baseURL is prepended to the signed path for the final href; the MAC
-// is computed over the path and expiry only (not the scheme/host).
-// The returned SignedURL includes expiration metadata derived from the same
-// timestamp used for signing, ensuring consistency across all fields.
-func (s *URLSigner) Sign(baseURL, path string) SignedURL {
-	now := time.Now()
-	expiresAt := now.Add(s.expiry)
-	exp := expiresAt.Unix()
-	msg := fmt.Sprintf("%s?exp=%d", path, exp)
+// signatureVersion labels the format of the signed message.
+const signatureVersion = "v1"
 
-	mac := hmac.New(sha256.New, s.key)
-	mac.Write([]byte(msg))
-	sig := base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
+// Sign returns a URL for operation on baseURL+path that expires after the configured expiry.
+func (s *URLSigner) Sign(operation, baseURL, path string) SignedURL {
+	expiresAt := time.Now().Add(s.expiry)
+	exp := strconv.FormatInt(expiresAt.Unix(), 10)
+	sig := base64.RawURLEncoding.EncodeToString(s.mac(operation, baseURL+path, exp))
 
 	return SignedURL{
-		Href:      fmt.Sprintf("%s%s?exp=%d&sig=%s", baseURL, path, exp, sig),
+		Href:      baseURL + path + "?exp=" + exp + "&sig=" + sig,
 		ExpiresIn: int64(s.expiry.Seconds()),
 		ExpiresAt: expiresAt.UTC().Format(time.RFC3339),
 	}
 }
 
-// Verify checks the signature and expiration of a request URI (path + query).
-// Returns nil if valid.
-//
-// The MAC is computed over "path?exp=<value>" only — the sig parameter and any
-// other query parameters are excluded from the signed message. This means
-// additional query parameters will not invalidate the signature, but they also
-// will not be covered by it. Do not rely on unsigned query parameters for
-// security-sensitive decisions.
-func (s *URLSigner) Verify(requestURI string) error {
+// Verify checks that requestURI, received at baseURL, is unexpired, signed for operation and has no other parameters.
+func (s *URLSigner) Verify(operation, baseURL, requestURI string) error {
 	u, err := url.ParseRequestURI(requestURI)
 	if err != nil {
 		return errors.New("malformed URL")
 	}
 
-	q := u.Query()
+	q, err := url.ParseQuery(u.RawQuery)
+	if err != nil {
+		return errors.New("malformed query")
+	}
 	sig := q.Get("sig")
 	expStr := q.Get("exp")
 	if sig == "" || expStr == "" {
 		return errors.New("missing signature parameters")
+	}
+	if len(q) != 2 || len(q["sig"]) != 1 || len(q["exp"]) != 1 {
+		return errors.New("unexpected query parameters")
 	}
 
 	exp, err := strconv.ParseInt(expStr, 10, 64)
@@ -102,21 +95,21 @@ func (s *URLSigner) Verify(requestURI string) error {
 		return errors.New("URL has expired")
 	}
 
-	// Reconstruct the signed message: path?exp=<value>
-	msg := fmt.Sprintf("%s?exp=%s", u.Path, expStr)
-
-	mac := hmac.New(sha256.New, s.key)
-	mac.Write([]byte(msg))
-	expected := mac.Sum(nil)
-
 	provided, err := base64.RawURLEncoding.DecodeString(sig)
 	if err != nil {
 		return errors.New("invalid signature encoding")
 	}
 
-	if !hmac.Equal(expected, provided) {
+	if !hmac.Equal(s.mac(operation, baseURL+u.Path, expStr), provided) {
 		return errors.New("invalid signature")
 	}
 
 	return nil
+}
+
+// mac returns the HMAC-SHA256 of the signature version, operation, target URL and expiry, one per line.
+func (s *URLSigner) mac(operation, target, exp string) []byte {
+	mac := hmac.New(sha256.New, s.key)
+	_, _ = mac.Write([]byte(signatureVersion + "\n" + operation + "\n" + target + "\n" + exp))
+	return mac.Sum(nil)
 }
