@@ -1,6 +1,6 @@
 # Build stage: runs natively on the build host regardless of target platform. TARGETOS and TARGETARCH are set
 # automatically by buildx, enabling native Go cross-compilation instead of slow QEMU emulation.
-FROM --platform=$BUILDPLATFORM golang:1.27-alpine@sha256:b8c9b82affbbb82a020bbcf998dad2ba9516944ac7e883524642a481a9505e9c AS builder
+FROM --platform=$BUILDPLATFORM golang:1.27-alpine@sha256:d200d2dd76b03a99b52651fd1325aff7dcd35422c35c01bac56571b0507f3deb AS builder
 
 ARG TARGETOS
 ARG TARGETARCH
@@ -17,7 +17,7 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath \
     -o anchor-lfs .
 
 # Runtime stage
-FROM alpine:3.24@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6
+FROM alpine:3.24@sha256:be2656061b536c1883c4034790e21d0a09c5aaaf51968b89368a3c0371ea2c9a
 
 RUN addgroup -S -g 101 anchor && adduser -S -u 100 -G anchor anchor \
     && mkdir -p /app/data && chown anchor:anchor /app/data
